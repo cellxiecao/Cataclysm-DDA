@@ -1,19 +1,23 @@
+#pragma once
 #ifndef MONDEFENSE_H
 #define MONDEFENSE_H
 
 class monster;
-struct projectile;
+class Creature;
+struct dealt_projectile_attack;
 
-class mdefense
+namespace mdefense
 {
-    public:
-        /**
-         * @param m The monster the defends itself.
-         * @param proj The projectile it was hit by or NULL if it
-         * was attacked with a melee attack.
-         */
-        void zapback            (monster *m, const projectile *proj);
-        void none               (monster *, const projectile *) {};
-};
+/**
+    * @param m The monster the defends itself.
+    * @param source The attacker
+    * @param proj The projectile it was hit by or NULL if it
+    * was attacked with a melee attack.
+    */
+void zapback( monster &m, Creature *source, const dealt_projectile_attack *proj );
+void acidsplash( monster &m, Creature *source, const dealt_projectile_attack *proj );
+
+void none( monster &, Creature *, const dealt_projectile_attack * );
+} //namespace mdefense
 
 #endif

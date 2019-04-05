@@ -1,12 +1,14 @@
+#pragma once
 #ifndef EVENT_H
 #define EVENT_H
 
-#include "faction.h"
-#include "line.h"
+#include <climits>
+#include <list>
 
-class game;
+#include "calendar.h"
+#include "enums.h"
 
-enum event_type {
+enum event_type : int {
     EVENT_NULL,
     EVENT_HELP,
     EVENT_WANTED,
@@ -23,17 +25,44 @@ enum event_type {
 };
 
 struct event {
-    event_type type;
-    int turn;
-    int faction_id;
+    event_type type = EVENT_NULL;
+    /** On which turn event should be happening. */
+    time_point when = calendar::time_of_cataclysm;
+    /** Which faction is responsible for handling this event. */
+    int faction_id = -1;
     /** Where the event happens, in global submap coordinates */
-    point map_point;
+    tripoint map_point = tripoint_min;
 
-    event();
-    event(event_type e_t, int t, int f_id, int x, int y);
+    event( event_type e_t, const time_point &w, int f_id, tripoint p );
 
     void actualize(); // When the time runs out
     void per_turn();  // Every turn
+};
+
+class event_manager
+{
+    private:
+        std::list<event> events;
+
+    public:
+        /**
+         * Add an entry to the event queue. Parameters are basically passed
+         * through to @ref event::event.
+         */
+        void add( event_type type, const time_point &when, int faction_id = -1 );
+        /**
+         * Add an entry to the event queue. Parameters are basically passed
+         * through to @ref event::event.
+         */
+        void add( event_type type, const time_point &when, int faction_id, const tripoint &where );
+        /// @returns Whether at least one element of the given type is queued.
+        bool queued( event_type type ) const;
+        /// @returns One of the queued events of the given type, or `nullptr`
+        /// if no event of that type is queued.
+        event *get( event_type type );
+        /// Process all queued events, potentially altering the game state and
+        /// modifying the event queue.
+        void process();
 };
 
 #endif

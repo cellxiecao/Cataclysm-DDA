@@ -1,89 +1,252 @@
 #include "player_activity.h"
-#include "translations.h"
 
-player_activity::player_activity(activity_type t, int turns, int Index, int pos,
-                                 std::string name_in) :
-    JsonSerializer(), JsonDeserializer(), type(t), moves_left(turns), index(Index),
-    position(pos), name(name_in), ignore_trivial(false), values(), str_values(),
-    placement(-1, -1), warned_of_proximity(false), auto_resume(false)
+#include <algorithm>
+
+#include "activity_handlers.h"
+#include "activity_type.h"
+#include "craft_command.h"
+#include "player.h"
+
+player_activity::player_activity() : type( activity_id::NULL_ID() ) { }
+
+player_activity::player_activity( activity_id t, int turns, int Index, int pos,
+                                  const std::string &name_in ) :
+    type( t ), moves_total( turns ), moves_left( turns ),
+    index( Index ),
+    position( pos ), name( name_in ),
+    placement( tripoint_min ), auto_resume( false )
 {
 }
 
-const std::string &player_activity::get_stop_phrase() const
+player_activity::player_activity( const player_activity &rhs )
+    : type( rhs.type ), ignored_distractions( rhs.ignored_distractions ),
+      moves_total( rhs.moves_total ), moves_left( rhs.moves_left ),
+      index( rhs.index ), position( rhs.position ), name( rhs.name ),
+      values( rhs.values ), str_values( rhs.str_values ),
+      coords( rhs.coords ), monsters( rhs.monsters ), placement( rhs.placement ),
+      auto_resume( rhs.auto_resume )
 {
-    static const std::string stop_phrase[NUM_ACTIVITIES] = {
-        _(" Stop?"), _(" Stop reloading?"),
-        _(" Stop reading?"), _(" Stop playing?"),
-        _(" Stop waiting?"), _(" Stop crafting?"),
-        _(" Stop crafting?"), _(" Stop disassembly?"),
-        _(" Stop butchering?"), _(" Stop foraging?"),
-        _(" Stop construction?"), _(" Stop construction?"),
-        _(" Stop pumping gas?"), _(" Stop training?"),
-        _(" Stop waiting?"), _(" Stop using first aid?"),
-        _(" Stop fishing?"), _(" Stop mining?"), _(" Stop burrowing?"),
-        _(" Stop smashing?"), _(" Stop de-stressing?"),
-        _(" Stop cutting tissues?"), _(" Stop dropping?"),
-        _(" Stop stashing?"), _(" Stop picking up?"),
-        _(" Stop moving items?"),
-        _(" Stop interacting with inventory?"),
-        _(" Stop lighting the fire?"), _("Stop filling the container?")
-    };
-    return stop_phrase[type];
+    targets.clear();
+    targets.reserve( rhs.targets.size() );
+    std::transform( rhs.targets.begin(), rhs.targets.end(), std::back_inserter( targets ),
+    []( const item_location & e ) {
+        return e.clone();
+    } );
 }
 
-bool player_activity::is_abortable() const
+player_activity &player_activity::operator=( const player_activity &rhs )
 {
-    switch(type) {
-    case ACT_READ:
-    case ACT_BUILD:
-    case ACT_CRAFT:
-    case ACT_LONGCRAFT:
-    case ACT_REFILL_VEHICLE:
-    case ACT_WAIT:
-    case ACT_WAIT_WEATHER:
-    case ACT_FIRSTAID:
-    case ACT_PICKAXE:
-    case ACT_BURROW:
-    case ACT_PULP:
-    case ACT_MAKE_ZLAVE:
-    case ACT_DROP:
-    case ACT_STASH:
-    case ACT_PICKUP:
-    case ACT_MOVE_ITEMS:
-    case ACT_ADV_INVENTORY:
-    case ACT_START_FIRE:
-    case ACT_FILL_LIQUID:
-        return true;
-    default:
-        return false;
-    }
+    type = rhs.type;
+    moves_total = rhs.moves_total;
+    moves_left = rhs.moves_left;
+    index = rhs.index;
+    position = rhs.position;
+    name = rhs.name;
+    ignored_distractions = rhs.ignored_distractions;
+    values = rhs.values;
+    str_values = rhs.str_values;
+    monsters = rhs.monsters;
+    coords = rhs.coords;
+    placement = rhs.placement;
+    auto_resume = rhs.auto_resume;
+
+    targets.clear();
+    targets.reserve( rhs.targets.size() );
+    std::transform( rhs.targets.begin(), rhs.targets.end(), std::back_inserter( targets ),
+    []( const item_location & e ) {
+        return e.clone();
+    } );
+
+    return *this;
+}
+
+void player_activity::set_to_null()
+{
+    type = activity_id::NULL_ID();
+}
+
+bool player_activity::rooted() const
+{
+    return type->rooted();
+}
+
+std::string player_activity::get_stop_phrase() const
+{
+    return type->stop_phrase();
+}
+
+int player_activity::get_value( size_t index, int def ) const
+{
+    return ( index < values.size() ) ? values[index] : def;
 }
 
 bool player_activity::is_suspendable() const
 {
-    switch(type) {
-    case ACT_NULL:
-    case ACT_RELOAD:
-    case ACT_DISASSEMBLE:
-    case ACT_MAKE_ZLAVE:
-    case ACT_DROP:
-    case ACT_STASH:
-    case ACT_PICKUP:
-    case ACT_MOVE_ITEMS:
-    case ACT_ADV_INVENTORY:
-        return false;
-    default:
-        return true;
+    return type->suspendable();
+}
+
+std::string player_activity::get_str_value( size_t index, const std::string &def ) const
+{
+    return ( index < str_values.size() ) ? str_values[index] : def;
+}
+
+void player_activity::do_turn( player &p )
+{
+    // Should happen before activity or it may fail du to 0 moves
+    if( *this && type->will_refuel_fires() ) {
+        try_fuel_fire( *this, p );
+    }
+
+    if( type->based_on() == based_on_type::TIME ) {
+        moves_left -= 100;
+    } else if( type->based_on() == based_on_type::SPEED ) {
+        if( p.moves <= moves_left ) {
+            moves_left -= p.moves;
+            p.moves = 0;
+        } else {
+            p.moves -= moves_left;
+            moves_left = 0;
+        }
+    }
+
+    // This might finish the activity (set it to null)
+    type->call_do_turn( this, &p );
+
+    if( *this && type->rooted() ) {
+        p.rooted();
+        p.pause();
+    }
+
+    if( *this && moves_left <= 0 ) {
+        // Note: For some activities "finish" is a misnomer; that's why we explicitly check if the
+        // type is ACT_NULL below.
+        if( !( type->call_finish( this, &p ) ) ) {
+            // "Finish" is never a misnomer for any activity without a finish function
+            set_to_null();
+        }
+    }
+    if( !*this ) {
+        // Make sure data of previous activity is cleared
+        p.activity = player_activity();
+        p.resume_backlog_activity();
+
+        // If whatever activity we were doing forced us to pick something up to
+        // handle it, drop any overflow that may have caused
+        p.drop_invalid_inventory();
     }
 }
 
-
-int player_activity::get_value(int index, int def) const
+template <typename T>
+bool containers_equal( const T &left, const T &right )
 {
-    return ((size_t)index < values.size()) ? values[index] : def;
+    if( left.size() != right.size() ) {
+        return false;
+    }
+
+    return std::equal( left.begin(), left.end(), right.begin() );
 }
 
-std::string player_activity::get_str_value(int index, std::string def) const
+bool player_activity::can_resume_with( const player_activity &other, const Character & ) const
 {
-    return ((size_t)index < str_values.size()) ? str_values[index] : def;
+    // Should be used for relative positions
+    // And to forbid resuming now-invalid crafting
+
+    // TODO: Once activity_handler_actors exist, the less ugly method of using a
+    // pure virtual can_resume_with should be used
+
+    if( !*this || !other || type->no_resume() ) {
+        return false;
+    }
+
+    if( id() == activity_id( "ACT_CRAFT" ) || id() == activity_id( "ACT_LONGCRAFT" ) ) {
+        // The last value is a time stamp, and the last coord is the player
+        // position.  We want to allow either to have changed.
+        // (This would be much less hacky in the hypothetical future of
+        // activity_handler_actors).
+        if( !( values.size() == other.values.size() &&
+               !values.empty() &&
+               std::equal( values.begin(), values.end() - 1, other.values.begin() ) &&
+               coords.size() == other.coords.size() &&
+               !coords.empty() &&
+               std::equal( coords.begin(), coords.end() - 1, other.coords.begin() ) ) ) {
+            return false;
+        }
+    } else if( id() == activity_id( "ACT_CLEAR_RUBBLE" ) ) {
+        if( other.coords.empty() || other.coords[0] != coords[0] ) {
+            return false;
+        }
+    } else if( id() == activity_id( "ACT_READ" ) ) {
+        // Return false if any NPCs joined or left the study session
+        // the vector {1, 2} != {2, 1}, so we'll have to check manually
+        if( values.size() != other.values.size() ) {
+            return false;
+        }
+        for( int foo : other.values ) {
+            if( std::find( values.begin(), values.end(), foo ) == values.end() ) {
+                return false;
+            }
+        }
+        if( targets.empty() || other.targets.empty() || targets[0] != other.targets[0] ) {
+            return false;
+        }
+    } else if( id() == activity_id( "ACT_DIG" ) || id() == activity_id( "ACT_DIG_CHANNEL" ) ) {
+        // We must be digging in the same location.
+        if( placement != other.placement ) {
+            return false;
+        }
+
+        // And all our parameters must be the same.
+        if( !std::equal( values.begin(), values.end(), other.values.begin() ) ) {
+            return false;
+        }
+
+        if( !std::equal( str_values.begin(), str_values.end(), other.str_values.begin() ) ) {
+            return false;
+        }
+
+        if( !std::equal( coords.begin(), coords.end(), other.coords.begin() ) ) {
+            return false;
+        }
+    }
+
+    return !auto_resume && id() == other.id() && index == other.index &&
+           position == other.position && name == other.name && targets == other.targets;
+}
+
+void player_activity::resume_with( const player_activity &other )
+{
+    if( id() == activity_id( "ACT_CRAFT" ) || id() == activity_id( "ACT_LONGCRAFT" ) ) {
+        // For crafting actions, we need to update the start turn and position
+        // to the resumption time values.  These are stored in the last
+        // elements of values and coords respectively.
+        if( !( !values.empty() && values.size() == other.values.size() &&
+               !coords.empty() && coords.size() == other.coords.size() ) ) {
+            debugmsg( "Activities incompatible; should not have resumed" );
+            return;
+        }
+        values.back() = other.values.back();
+        coords.back() = other.coords.back();
+    }
+}
+
+bool player_activity::is_distraction_ignored( distraction_type type ) const
+{
+    return ignored_distractions.find( type ) != ignored_distractions.end();
+}
+
+void player_activity::ignore_distraction( distraction_type type )
+{
+    ignored_distractions.emplace( type );
+}
+
+void player_activity::allow_distractions()
+{
+    ignored_distractions.clear();
+}
+
+void player_activity::inherit_distractions( const player_activity &other )
+{
+    for( auto &type : other.ignored_distractions ) {
+        ignore_distraction( type );
+    }
 }

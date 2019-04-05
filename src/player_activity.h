@@ -1,77 +1,80 @@
+#pragma once
 #ifndef PLAYER_ACTIVITY_H
 #define PLAYER_ACTIVITY_H
 
-#include "enums.h"
-#include "json.h"
-#include <vector>
 #include <climits>
+#include <set>
+#include <vector>
 
-enum activity_type {    // expanded this enum for readability
-    ACT_NULL = 0,
-    ACT_RELOAD,
-    ACT_READ,
-    ACT_GAME,
-    ACT_WAIT,
-    ACT_CRAFT,
-    ACT_LONGCRAFT,
-    ACT_DISASSEMBLE,
-    ACT_BUTCHER,
-    ACT_FORAGE,
-    ACT_BUILD,
-    ACT_VEHICLE,
-    ACT_REFILL_VEHICLE,
-    ACT_TRAIN,
-    ACT_WAIT_WEATHER,
-    ACT_FIRSTAID,
-    ACT_FISH,
-    ACT_PICKAXE,
-    ACT_BURROW,
-    ACT_PULP,
-    ACT_VIBE,
-    ACT_MAKE_ZLAVE,
-    ACT_DROP,
-    ACT_STASH,
-    ACT_PICKUP,
-    ACT_MOVE_ITEMS,
-    ACT_ADV_INVENTORY,
-    ACT_START_FIRE,
-    ACT_FILL_LIQUID,
-    NUM_ACTIVITIES
-};
+#include "enums.h"
+#include "item_location.h"
+#include "string_id.h"
 
-class player_activity : public JsonSerializer, public JsonDeserializer
+class player;
+class Character;
+class JsonIn;
+class JsonOut;
+class player_activity;
+class activity_type;
+class monster;
+
+using activity_id = string_id<activity_type>;
+
+class player_activity
 {
+    private:
+        activity_id type;
+        std::set<distraction_type> ignored_distractions;
     public:
-        activity_type type;
+        /** Total number of moves required to complete the activity */
+        int moves_total;
+        /** The number of moves remaining in this activity before it is complete. */
         int moves_left;
+        /** An activity specific value. */
         int index;
+        /** An activity specific value. */
         int position;
+        /** An activity specific value. */
         std::string name;
-        bool ignore_trivial;
+        std::vector<item_location> targets;
         std::vector<int> values;
         std::vector<std::string> str_values;
-        point placement;
-        bool warned_of_proximity; // True if player has been warned of dangerously close monsters
-        // Property that makes the activity resume if the previous activity completes.
+        std::vector<tripoint> coords;
+        std::vector<std::weak_ptr<monster>> monsters;
+        tripoint placement;
+        /** If true, the activity will be auto-resumed next time the player attempts
+         *  an identical activity. This value is set dynamically.
+         */
         bool auto_resume;
 
-        player_activity(activity_type t = ACT_NULL, int turns = 0, int Index = -1, int pos = INT_MIN,
-                        std::string name_in = "");
-        player_activity(player_activity &&) = default;
-        player_activity(const player_activity &) = default;
-        player_activity &operator=(player_activity &&) = default;
-        player_activity &operator=(const player_activity &) = default;
+        player_activity();
+        player_activity( activity_id, int turns = 0, int Index = -1, int pos = INT_MIN,
+                         const std::string &name_in = "" );
+        player_activity( player_activity && ) = default;
+        player_activity( const player_activity & );
+        player_activity &operator=( player_activity && ) = default;
+        player_activity &operator=( const player_activity & );
 
-        // Question to ask when the activity is to be stoped,
-        // e.g. " Stop doing something?", already translated.
-        const std::string &get_stop_phrase() const;
-        /**
-         * If this returns true, the activity can be aborted with
-         * the ACTION_PAUSE key (see game::handle_key_blocking_activity)
-         */
-        bool is_abortable() const;
-        int get_value(int index, int def = 0) const;
-        std::string get_str_value(int index, const std::string def = "") const;
+        explicit operator bool() const {
+            return !type.is_null();
+        }
+        bool is_null() const {
+            return type.is_null();
+        }
+        /** This replaces the former usage `act.type = ACT_NULL` */
+        void set_to_null();
+
+        const activity_id &id() const {
+            return type;
+        }
+        bool rooted() const;
+
+        // Question to ask when the activity is to be stopped,
+        // e.g. "Stop doing something?", already translated.
+        std::string get_stop_phrase() const;
+
+        int get_value( size_t index, int def = 0 ) const;
+        std::string get_str_value( size_t index, const std::string &def = "" ) const;
         /**
          * If this returns true, the action can be continued without
          * starting from scratch again (see player::backlog). This is only
@@ -80,12 +83,35 @@ class player_activity : public JsonSerializer, public JsonDeserializer
          */
         bool is_suspendable() const;
 
-        using JsonSerializer::serialize;
-        void serialize(JsonOut &jsout) const;
-        using JsonDeserializer::deserialize;
-        void deserialize(JsonIn &jsin);
+        void serialize( JsonOut &jsout ) const;
+        void deserialize( JsonIn &jsin );
+        /** Convert from the old enumeration to the new string_id */
+        void deserialize_legacy_type( int legacy_type, activity_id &dest );
 
-        void load_legacy(std::stringstream &dump);
+        /**
+         * Performs the activity for a single turn. If the activity is complete
+         * at the end of the turn, do_turn also executes whatever actions, if
+         * any, are needed to conclude the activity.
+         */
+        void do_turn( player &p );
+
+        /**
+         * Returns true if activities are similar enough that this activity
+         * can be resumed instead of starting the other activity.
+         */
+        bool can_resume_with( const player_activity &other, const Character &who ) const;
+        /**
+         * When an old activity A is resumed by a new activity B, normally B is
+         * discarded and the saved A is simply used in its place.  However,
+         * this will be called on A, passing B as an argument, in case A needs
+         * to grab any values from B.
+         */
+        void resume_with( const player_activity &other );
+
+        bool is_distraction_ignored( distraction_type type ) const;
+        void ignore_distraction( distraction_type type );
+        void allow_distractions();
+        void inherit_distractions( const player_activity & );
 };
 
 #endif

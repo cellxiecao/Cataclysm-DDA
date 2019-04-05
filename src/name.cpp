@@ -1,155 +1,151 @@
-#include <map>
-#include <fstream>
-#include <sstream>
-
-#include "json.h"
 #include "name.h"
-#include "output.h"
-#include "translations.h"
+
+#include <map>
+#include <string>
+
+#include "cata_utility.h"
+#include "json.h"
 #include "rng.h"
+#include "string_formatter.h"
+#include "translations.h"
 
-NameGenerator::NameGenerator()
+namespace Name
 {
+static std::map< nameFlags, std::vector< std::string > > names;
 
-}
+static const std::map< std::string, nameFlags > usage_flags = {
+    { "given",     nameIsGivenName },
+    { "family",    nameIsFamilyName },
+    { "universal", nameIsGivenName | nameIsFamilyName },
+    { "nick",      nameIsNickName },
+    { "backer",    nameIsFullName },
+    { "city",      nameIsTownName },
+    { "world",     nameIsWorldName }
+};
 
-void NameGenerator::clear_names()
+static const std::map< std::string, nameFlags > gender_flags {
+    { "male",   nameIsMaleName },
+    { "female", nameIsFemaleName },
+    { "unisex", nameIsUnisexName }
+};
+
+static nameFlags usage_flag( const std::string &usage )
 {
-    names.clear();
-}
-
-void NameGenerator::load_name(JsonObject &jo)
-{
-    std::string name = jo.get_string("name");
-    std::string usage = jo.get_string("usage");
-    uint32_t flags = 0;
-
-    if (usage == "given") {
-        flags |= nameIsGivenName;
-        name = pgettext("Given Name", name.c_str());
-    } else if (usage == "family") {
-        flags |= nameIsFamilyName;
-        name = pgettext("Family Name", name.c_str());
-    } else if (usage == "universal") {
-        flags |= nameIsGivenName | nameIsFamilyName;
-        name = pgettext("Either Name", name.c_str());
-    } else if (usage == "backer") {
-        flags |= nameIsFullName;
-        name = pgettext("Full Name", name.c_str());
-    } else if (usage == "city") {
-        flags |= nameIsTownName;
-        name = pgettext("City Name", name.c_str());
-    } else if (usage == "world") {
-        flags |= nameIsWorldName;
-        name = pgettext("World Name", name.c_str());
+    const auto it = usage_flags.find( usage );
+    if( it != usage_flags.end() ) {
+        return it->second;
     }
+    return static_cast< nameFlags >( 0 );
+}
 
-    // Gender is optional
-    if(jo.has_member("gender")) {
-        std::string gender = jo.get_string("gender");
+static nameFlags gender_flag( const std::string &gender )
+{
+    const auto it = gender_flags.find( gender );
+    if( it != gender_flags.end() ) {
+        return it->second;
+    }
+    return static_cast< nameFlags >( 0 );
+}
 
-        if (gender == "male") {
-            flags |= nameIsMaleName;
-        } else if (gender == "female") {
-            flags |= nameIsFemaleName;
-        } else if (gender == "unisex") {
-            flags |= nameIsUnisexName;
+// The loaded name is one of usage with optional gender.
+// The combinations used in names files are as follows.
+//
+// Backer | (Female|Male|Unisex)
+// Given  | (Female|Male)        // unisex names are duplicated in each group
+// Family | Unisex
+// Nick
+// City
+// World
+static void load( JsonIn &jsin )
+{
+    jsin.start_array();
+
+    while( !jsin.end_array() ) {
+        JsonObject jo = jsin.get_object();
+
+        // get flags of name.
+        const nameFlags type =
+            usage_flag( jo.get_string( "usage" ) )
+            | gender_flag( jo.get_string( "gender", "" ) );
+
+        // find group type and add name to group
+        names[type].push_back( jo.get_string( "name" ) );
+    }
+}
+
+void load_from_file( const std::string &filename )
+{
+    read_from_file_json( filename, load );
+}
+
+// get name groups for which searchFlag is a subset.
+//
+// i.e. if searchFlag is  [ Male|Family ]
+// it will match any group with those two flags set, such as [ Unisex|Family ]
+using names_vec = std::vector< decltype( names.cbegin() ) >;
+static names_vec get_matching_groups( nameFlags searchFlags )
+{
+    names_vec matching_groups;
+    for( auto it = names.cbegin(), end = names.cend(); it != end; ++it ) {
+        const nameFlags type = it->first;
+        if( ( searchFlags & type ) == searchFlags ) {
+            matching_groups.push_back( it );
         }
     }
-
-    Name aName(name, flags);
-
-    names.push_back(aName);
+    return matching_groups;
 }
 
-std::vector<std::string> NameGenerator::filteredNames(uint32_t searchFlags)
+// Get a random name with the specified flag
+std::string get( nameFlags searchFlags )
 {
+    auto matching_groups = get_matching_groups( searchFlags );
+    if( ! matching_groups.empty() ) {
+        // get number of choices
+        size_t nChoices = 0;
+        for( const auto &i : matching_groups ) {
+            const auto &group = i->second;
+            nChoices += group.size();
+        }
 
-    std::vector<std::string> retval;
-
-    for (std::vector<Name>::const_iterator aName = names.begin(); aName != names.end(); ++aName) {
-        if ((aName->flags() & searchFlags) == searchFlags) {
-            retval.push_back(aName->value());
+        // make random selection and return result.
+        size_t choice = rng( 0, nChoices - 1 );
+        for( const auto &i : matching_groups ) {
+            const auto &group = i->second;
+            if( choice < group.size() ) {
+                return group[choice];
+            }
+            choice -= group.size();
         }
     }
-    return retval;
+    // BUG, no matching name found.
+    return std::string( _( "Tom" ) );
 }
 
-std::string NameGenerator::getName(uint32_t searchFlags)
+std::string generate( bool is_male )
 {
-    std::vector<std::string> theseNames = filteredNames(searchFlags);
-    if( theseNames.empty() ) {
-        return std::string( _("Tom") );
-    }
-    return theseNames[ rng( 0, theseNames.size() - 1 ) ];
-}
-
-std::string NameGenerator::generateName(bool male)
-{
-    uint32_t baseSearchFlags = male ? nameIsMaleName : nameIsFemaleName;
+    const nameFlags baseSearchFlags = is_male ? nameIsMaleName : nameIsFemaleName;
     //One in four chance to pull from the backer list, otherwise generate a name from the parts list
-    if (one_in(4)) {
-        return getName(baseSearchFlags | nameIsFullName);
+    if( one_in( 4 ) ) {
+        return get( baseSearchFlags | nameIsFullName );
     } else {
-        //~ used for constructing names. swapping these will put family name first.
-        return string_format(pgettext("Full Name", "%1$s %2$s"),
-                             getName(baseSearchFlags | nameIsGivenName).c_str(),
-                             getName(baseSearchFlags | nameIsFamilyName).c_str()
+        //~ Used for constructing full name: %1$s is `family name`, %2$s is `given name`
+        std::string full_name_format = "%1$s %2$s";
+        //One in three chance to add a nickname to full name
+        if( one_in( 3 ) ) {
+            //~ Used for constructing full name with nickname: %1$s is `family name`, %2$s is `given name`, %3$s is `nickname`
+            full_name_format = "%1$s '%3$s' %2$s";
+        }
+        return string_format( pgettext( "Full Name", full_name_format.c_str() ),
+                              get( baseSearchFlags | nameIsGivenName ).c_str(),
+                              get( baseSearchFlags | nameIsFamilyName ).c_str(),
+                              get( nameIsNickName ).c_str()
                             );
     }
 }
 
-NameGenerator &Name::generator()
+void clear()
 {
-    return NameGenerator::generator();
+    names.clear();
 }
-
-std::string Name::generate(bool male)
-{
-    return NameGenerator::generator().generateName(male);
-}
-
-std::string Name::get(uint32_t searchFlags)
-{
-    return NameGenerator::generator().getName(searchFlags);
-}
-
-Name::Name()
-{
-    _value = _("Tom");
-    _flags = 15;
-}
-
-Name::Name(std::string name, uint32_t flags)
-{
-    _value = name;
-    _flags = flags;
-}
-
-void load_names_from_file(const std::string &filename)
-{
-    std::ifstream data_file;
-    data_file.open(filename.c_str(), std::ifstream::in | std::ifstream::binary);
-    if(!data_file.good()) {
-        throw "Could not read " + filename;
-    }
-
-    NameGenerator &gen = NameGenerator::generator();
-
-    std::istringstream iss(
-        std::string(
-            (std::istreambuf_iterator<char>(data_file)),
-            std::istreambuf_iterator<char>()
-        )
-    );
-    JsonIn jsin(iss);
-    data_file.close();
-
-    // load em all
-    jsin.start_array();
-    while (!jsin.end_array()) {
-        JsonObject json_name = jsin.get_object();
-        gen.load_name(json_name);
-    }
 }
 

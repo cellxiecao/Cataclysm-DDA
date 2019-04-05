@@ -1,3721 +1,3201 @@
-#include "npc.h"
-#include "output.h"
-#include "game.h"
-#include "dialogue.h"
-#include "rng.h"
-#include "line.h"
-#include "debug.h"
-#include "catacharset.h"
-#include "messages.h"
-#include <vector>
-#include <string>
+#include "dialogue.h" // IWYU pragma: associated
+
+#include <algorithm>
 #include <sstream>
-#include <fstream>
+#include <string>
+#include <vector>
 
-std::string talk_needs[num_needs][5];
-std::string talk_okay[10];
-std::string talk_no[10];
-std::string talk_bad_names[10];
-std::string talk_good_names[10];
-std::string talk_swear[10];
-std::string talk_swear_interjection[10];
-std::string talk_fuck_you[10];
-std::string talk_very[10];
-std::string talk_really[10];
-std::string talk_happy[10];
-std::string talk_sad[10];
-std::string talk_greeting_gen[10];
-std::string talk_ill_die[10];
-std::string talk_ill_kill_you[10];
-std::string talk_drop_weapon[10];
-std::string talk_hands_up[10];
-std::string talk_no_faction[10];
-std::string talk_come_here[10];
-std::string talk_keep_up[10] ;
-std::string talk_wait[10];
-std::string talk_let_me_pass[10];
-// Used to tell player to move to avoid friendly fire
-std::string talk_move[10];
-std::string talk_done_mugging[10];
-std::string talk_leaving[10];
-std::string talk_catch_up[10];
+#include "ammo.h"
+#include "basecamp.h"
+#include "cata_utility.h"
+#include "catacharset.h"
+// needed for the workaround for the std::to_string bug in some compilers
+#include "compatibility.h" // IWYU pragma: keep
+#include "coordinate_conversions.h"
+#include "debug.h"
+#include "editmap.h"
+#include "faction_camp.h"
+#include "game.h"
+#include "help.h"
+#include "input.h"
+#include "item_group.h"
+#include "itype.h"
+#include "json.h"
+#include "line.h"
+#include "map.h"
+#include "map_selector.h"
+#include "martialarts.h"
+#include "messages.h"
+#include "mission.h"
+#include "mission_companion.h"
+#include "morale_types.h"
+#include "npc.h"
+#include "npc_class.h"
+#include "npctalk.h"
+#include "npctrade.h"
+#include "output.h"
+#include "overmap.h"
+#include "overmapbuffer.h"
+#include "rng.h"
+#include "skill.h"
+#include "string_formatter.h"
+#include "string_input_popup.h"
+#include "text_snippets.h"
+#include "translations.h"
+#include "ui.h"
+#include "units.h"
+#include "vehicle.h"
+#include "vehicle_selector.h"
+#include "vpart_position.h"
 
-#define NUM_STATIC_TAGS 26
+const skill_id skill_speech( "speech" );
+const skill_id skill_barter( "barter" );
 
-tag_data talk_tags[NUM_STATIC_TAGS] = {
-{"<okay>",          &talk_okay},
-{"<no>",            &talk_no},
-{"<name_b>",        &talk_bad_names},
-{"<name_g>",        &talk_good_names},
-{"<swear>",         &talk_swear},
-{"<swear!>",        &talk_swear_interjection},
-{"<fuck_you>",      &talk_fuck_you},
-{"<very>",          &talk_very},
-{"<really>",        &talk_really},
-{"<happy>",         &talk_happy},
-{"<sad>",           &talk_sad},
-{"<greet>",         &talk_greeting_gen},
-{"<ill_die>",       &talk_ill_die},
-{"<ill_kill_you>",  &talk_ill_kill_you},
-{"<drop_it>",       &talk_drop_weapon},
-{"<hands_up>",      &talk_hands_up},
-{"<no_faction>",    &talk_no_faction},
-{"<come_here>",     &talk_come_here},
-{"<keep_up>",       &talk_keep_up},
-{"<lets_talk>",     &talk_come_here},
-{"<wait>",          &talk_wait},
-{"<let_me_pass>",   &talk_let_me_pass},
-{"<move>",          &talk_move},
-{"<done_mugging>",  &talk_done_mugging},
-{"<catch_up>",      &talk_catch_up},
-{"<im_leaving_you>",&talk_leaving}
-};
+const efftype_id effect_allow_sleep( "allow_sleep" );
+const efftype_id effect_asked_for_item( "asked_for_item" );
+const efftype_id effect_asked_personal_info( "asked_personal_info" );
+const efftype_id effect_asked_to_follow( "asked_to_follow" );
+const efftype_id effect_asked_to_lead( "asked_to_lead" );
+const efftype_id effect_asked_to_train( "asked_to_train" );
+const efftype_id effect_bite( "bite" );
+const efftype_id effect_bleed( "bleed" );
+const efftype_id effect_currently_busy( "currently_busy" );
+const efftype_id effect_gave_quest_item( "gave_quest_item" );
+const efftype_id effect_infected( "infected" );
+const efftype_id effect_infection( "infection" );
+const efftype_id effect_lying_down( "lying_down" );
+const efftype_id effect_narcosis( "narcosis" );
+const efftype_id effect_sleep( "sleep" );
+
+static const trait_id trait_DEBUG_MIND_CONTROL( "DEBUG_MIND_CONTROL" );
+
+static std::map<std::string, json_talk_topic> json_talk_topics;
 
 // Every OWED_VAL that the NPC owes you counts as +1 towards convincing
-#define OWED_VAL 250
-
-// Some aliases to help with gen_responses
-#define RESPONSE(txt)      ret.push_back(talk_response());\
-                           ret.back().text = txt
-
-#define SELECT_MISS(txt, index)  ret.push_back(talk_response());\
-                                 ret.back().text = txt;\
-                                 ret.back().mission_index = index
-
-#define SELECT_TEMP(txt, index)  ret.push_back(talk_response());\
-                                 ret.back().text = txt;\
-                                 ret.back().tempvalue = index
-
-#define SELECT_SKIL(txt, skillIn)  ret.push_back(talk_response());\
-                                 ret.back().text = txt;\
-                                 ret.back().skill = skillIn;
-
-#define SELECT_STYLE(txt, styleIn)  ret.push_back(talk_response());\
-                                 ret.back().text = txt;\
-                                 ret.back().style = styleIn;
-
-#define TRIAL(tr, diff) ret.back().trial = tr;\
-                        ret.back().difficulty = diff
-
-#define SUCCESS(topic)  ret.back().success = topic
-#define FAILURE(topic)  ret.back().failure = topic
-
-#define SUCCESS_OPINION(T, F, V, A, O)   ret.back().opinion_success =\
-                                         npc_opinion(T, F, V, A, O)
-#define FAILURE_OPINION(T, F, V, A, O)   ret.back().opinion_failure =\
-                                         npc_opinion(T, F, V, A, O)
-
-#define SUCCESS_ACTION(func)  ret.back().effect_success = func
-#define FAILURE_ACTION(func)  ret.back().effect_failure = func
-
-#define SUCCESS_MISSION(type) ret.back().miss = type
+#define OWED_VAL 1000
 
 #define dbg(x) DebugLog((DebugLevel)(x),D_GAME) << __FILE__ << ":" << __LINE__ << ": "
 
-std::string dynamic_line(talk_topic topic, npc *p);
-std::vector<talk_response> gen_responses(talk_topic topic, npc *p);
-int topic_category(talk_topic topic);
+int topic_category( const talk_topic &the_topic );
 
-talk_topic special_talk(char ch);
+const talk_topic &special_talk( char ch );
 
-int trial_chance(talk_response response, player *u, npc *p);
+std::string give_item_to( npc &p, bool allow_use, bool allow_carry );
 
-bool trade(npc *p, int cost, std::string deal);
+std::string bulk_trade_inquire( const npc &, const itype_id &it );
+void bulk_trade_accept( npc &, const itype_id &it );
 
-void game::init_npctalk()
+const std::string &talk_trial::name() const
 {
-    std::string tmp_talk_needs[num_needs][5] = {
-    {"", "", "", "", ""},
-    {_("Hey<punc> You got any <ammo>?"), _("I'll need some <ammo> soon, got any?"),
-     _("I really need some <ammo><punc>"), _("I need <ammo> for my <mywp>, got any?"),
-     _("I need some <ammo> <very> bad<punc>")},
-    {_("Got anything I can use as a weapon?"),
-     _("<ill_die> without a good weapon<punc>"),
-     _("I'm sick of fighting with my <swear> <mywp>, got something better?"),
-     _("Hey <name_g>, care to sell me a weapon?"),
-     _("My <mywp> just won't cut it, I need a real weapon...")},
-    {_("Hey <name_g>, I could really use a gun."),
-     _("Hey, you got a spare gun?  It'd be better than my <swear> <mywp><punc>"),
-     _("<ill_die> if I don't find a gun soon!"),
-     _("<name_g><punc> Feel like selling me a gun?"),
-     _("I need a gun, any kind will do!")},
-    {_("I could use some food, here."), _("I need some food, <very> bad!"),
-     _("Man, am I <happy> to see you!  Got any food to trade?"),
-     _("<ill_die> unless I get some food in me<punc> <okay>?"),
-     _("Please tell me you have some food to trade!")},
-    {_("Got anything to drink?"), _("I need some water or something."),
-     _("<name_g>, I need some water... got any?"),
-     _("<ill_die> without something to drink."), _("You got anything to drink?")}
-    };
-
-    for(int i = 0; i < num_needs; i++) {
-        for(int j = 0; j < 5; j++) {
-            talk_needs[i][j] = tmp_talk_needs[i][j];
+    static const std::array<std::string, NUM_TALK_TRIALS> texts = { {
+            "", _( "LIE" ), _( "PERSUADE" ), _( "INTIMIDATE" ), ""
         }
+    };
+    if( static_cast<size_t>( type ) >= texts.size() ) {
+        debugmsg( "invalid trial type %d", static_cast<int>( type ) );
+        return texts[0];
     }
-
-    std::string tmp_talk_okay[10] = {
-    _("okay"), _("get it"), _("you dig"), _("dig"), _("got it"), _("you see"), _("see, <name_g>"),
-    _("alright"), _("that clear")};
-    for(int j=0; j<10; j++) {talk_okay[j] = tmp_talk_okay[j];}
-
-    std::string tmp_talk_no[10] = {
-    _("no"), _("fuck no"), _("hell no"), _("no way"), _("not a chance"),
-    _("I don't think so"), _("no way in hell"), _("nuh uh"), _("nope"), _("fat chance")};
-    for(int j=0; j<10; j++) {talk_no[j] = tmp_talk_no[j];}
-
-    std::string tmp_talk_bad_names[10] = {
-    _("punk"),  _("loser"), _("dickhead"), _("asshole"), _("fucker"),
-    _("sucker"), _("fuckwad"), _("jerk"), _("motherfucker"), _("shithead")};
-    for(int j=0; j<10; j++) {talk_bad_names[j] = tmp_talk_bad_names[j];}
-
-    std::string tmp_talk_good_names[10] = {
-    _("stranger"), _("friend"), _("pilgrim"), _("traveler"), _("pal"),
-    _("fella"), _("you"),  _("dude"),  _("buddy"), _("man")};
-    for(int j=0; j<10; j++) {talk_good_names[j] = tmp_talk_good_names[j];}
-
-    std::string tmp_talk_swear[10] = { // e.g. _("drop the <swear> weapon")
-    _("fucking"), _("goddamn"), _("motherfucking"), _("freaking"), _("damn"), _("<swear> <swear>"),
-    _("fucking"), _("fuckin'"), _("god damn"), _("mafuckin'")};
-    for(int j=0; j<10; j++) {talk_swear[j] = tmp_talk_swear[j];}
-
-    std::string tmp_talk_swear_interjection[10] = {
-    _("fuck"), _("damn"), _("damnit"), _("shit"), _("fuckit"), _("crap"),
-    _("motherfucker"), _("<swear><punc> <swear!>"), _("<very> <swear!>"), _("son of an ass")};
-    for(int j=0; j<10; j++) {talk_swear_interjection[j] = tmp_talk_swear_interjection[j];}
-
-    std::string tmp_talk_fuck_you[10] = {
-    _("fuck you"), _("fuck off"), _("go fuck yourself"), _("<fuck_you>, <name_b>"),
-    _("<fuck_you>, <swear> <name_b>"), _("<name_b>"), _("<swear> <name_b>"),
-    _("fuck you"), _("fuck off"), _("go fuck yourself")};
-    for(int j=0; j<10; j++) {talk_fuck_you[j] = tmp_talk_fuck_you[j];}
-
-    std::string tmp_talk_very[10] = { // Synonyms for _("very") -- applied to adjectives
-    _("really"), _("fucking"), _("super"), _("wicked"), _("very"), _("mega"), _("uber"), _("ultra"),
-    _("so <very>"), _("<very> <very>")};
-    for(int j=0; j<10; j++) {talk_very[j] = tmp_talk_very[j];}
-
-    std::string tmp_talk_really[10] = { // Synonyms for _("really") -- applied to verbs
-    _("really"), _("fucking"), _("absolutely"), _("definitely"), _("for real"), _("honestly"),
-    _("<really> <really>"), _("most <really>"), _("urgently"), _("REALLY")};
-    for(int j=0; j<10; j++) {talk_really[j] = tmp_talk_really[j];}
-
-    std::string tmp_talk_happy[10] = {
-    _("glad"), _("happy"), _("overjoyed"), _("ecstatic"), _("thrilled"), _("stoked"),
-    _("<very> <happy>"), _("tickled pink"), _("delighted"), _("pumped")};
-    for(int j=0; j<10; j++) {talk_happy[j] = tmp_talk_happy[j];}
-
-    std::string tmp_talk_sad[10] = {
-    _("sad"), _("bummed"), _("depressed"), _("pissed"), _("unhappy"), _("<very> <sad>"), _("dejected"),
-    _("down"), _("blue"), _("glum")};
-    for(int j=0; j<10; j++) {talk_sad[j] = tmp_talk_sad[j];}
-
-    std::string tmp_talk_greeting_gen[10] = {
-    _("Hey <name_g>."), _("Greetings <name_g>."), _("Hi <name_g><punc> You okay?"),
-    _("<name_g><punc>  Let's talk."), _("Well hey there."),
-    _("<name_g><punc>  Hello."), _("What's up, <name_g>?"), _("You okay, <name_g>?"),
-    _("Hello, <name_g>."), _("Hi <name_g>")};
-    for(int j=0; j<10; j++) {talk_greeting_gen[j] = tmp_talk_greeting_gen[j];}
-
-    std::string tmp_talk_ill_die[10] = {
-    _("I'm not gonna last much longer"), _("I'll be dead soon"), _("I'll be a goner"),
-    _("I'm dead, <name_g>,"), _("I'm dead meat"), _("I'm in <very> serious trouble"),
-    _("I'm <very> doomed"), _("I'm done for"), _("I won't last much longer"),
-    _("my days are <really> numbered")};
-    for(int j=0; j<10; j++) {talk_ill_die[j] = tmp_talk_ill_die[j];}
-
-    std::string tmp_talk_ill_kill_you[10] = {
-    _("I'll kill you"), _("you're dead"), _("I'll <swear> kill you"), _("you're dead meat"),
-    _("<ill_kill_you>, <name_b>"), _("you're a dead <man>"), _("you'll taste my <mywp>"),
-    _("you're <swear> dead"), _("<name_b>, <ill_kill_you>")};
-    for(int j=0; j<10; j++) {talk_ill_kill_you[j] = tmp_talk_ill_kill_you[j];}
-
-    std::string tmp_talk_drop_weapon[10] = {
-    _("Drop your <swear> weapon!"),
-    _("Okay <name_b>, drop your weapon!"),
-    _("Put your <swear> weapon down!"),
-    _("Drop the <yrwp>, <name_b>!"),
-    _("Drop the <swear> <yrwp>!"),
-    _("Drop your <yrwp>!"),
-    _("Put down the <yrwp>!"),
-    _("Drop your <swear> weapon, <name_b>!"),
-    _("Put down your <yrwp>!"),
-    _("Alright, drop the <yrwp>!")
-    };
-    for(int j=0; j<10; j++) {talk_drop_weapon[j] = tmp_talk_drop_weapon[j];}
-
-    std::string tmp_talk_hands_up[10] = {
-    _("Put your <swear> hands up!"),
-    _("Put your hands up, <name_b>!"),
-    _("Reach for the sky!"),
-    _("Hands up!"),
-    _("Hands in the air!"),
-    _("Hands up, <name_b>!"),
-    _("Hands where I can see them!"),
-    _("Okay <name_b>, hands up!"),
-    _("Okay <name_b><punc> hands up!"),
-    _("Hands in the air, <name_b>!")
-    };
-    for(int j=0; j<10; j++) {talk_hands_up[j] = tmp_talk_hands_up[j];}
-
-    std::string tmp_talk_no_faction[10] = {
-    _("I'm unaffiliated."),
-    _("I don't run with a crew."),
-    _("I'm a solo artist, <okay>?"),
-    _("I don't kowtow to any group, <okay>?"),
-    _("I'm a freelancer."),
-    _("I work alone, <name_g>."),
-    _("I'm a free agent, more money that way."),
-    _("I prefer to work uninhibited by that kind of connection."),
-    _("I haven't found one that's good enough for me."),
-    _("I don't belong to a faction, <name_g>.")
-    };
-    for(int j=0; j<10; j++) {talk_no_faction[j] = tmp_talk_no_faction[j];}
-
-    std::string tmp_talk_come_here[10] = {
-    _("Wait up, let's talk!"),
-    _("Hey, I <really> want to talk to you!"),
-    _("Come on, talk to me!"),
-    _("Hey <name_g>, let's talk!"),
-    _("<name_g>, we <really> need to talk!"),
-    _("Hey, we should talk, <okay>?"),
-    _("<name_g>!  Wait up!"),
-    _("Wait up, <okay>?"),
-    _("Let's talk, <name_g>!"),
-    _("Look, <name_g><punc> let's talk!")
-    };
-    for(int j=0; j<10; j++) {talk_come_here[j] = tmp_talk_come_here[j];}
-
-    std::string tmp_talk_keep_up[10] = {
-    _("Catch up!"),
-    _("Get over here!"),
-    _("Catch up, <name_g>!"),
-    _("Keep up!"),
-    _("Come on, <catch_up>!"),
-
-    _("Keep it moving!"),
-    _("Stay with me!"),
-    _("Keep close!"),
-    _("Stay close!"),
-    _("Let's keep going!")
-    };
-    for(int j=0; j<10; j++) {talk_keep_up[j] = tmp_talk_keep_up[j];}
-
-    std::string tmp_talk_wait[10] = {
-    _("Hey, where are you?"),
-    _("Wait up, <name_g>!"),
-    _("<name_g>, wait for me!"),
-    _("Hey, wait up, <okay>?"),
-    _("You <really> need to wait for me!"),
-    _("You <swear> need to wait!"),
-    _("<name_g>, where are you?"),
-    _("Hey <name_g><punc> Wait for me!"),
-    _("Where are you?!"),
-    _("Hey, I'm over here!")
-    };
-    for(int j=0; j<10; j++) {talk_wait[j] = tmp_talk_wait[j];}
-
-    std::string tmp_talk_let_me_pass[10] = {
-    _("Excuse me, let me pass."),
-    _("Hey <name_g>, can I get through?"),
-    _("Let me get past you, <name_g>."),
-    _("Let me through, <okay>?"),
-    _("Can I get past you, <name_g>?"),
-    _("I need to get past you, <name_g>."),
-    _("Move your <swear> ass, <name_b>!"),
-    _("Out of my way, <name_b>!"),
-    _("Move it, <name_g>!"),
-    _("You need to move, <name_g>, <okay>?")
-    };
-    for(int j=0; j<10; j++) {talk_let_me_pass[j] = tmp_talk_let_me_pass[j];}
-
-    // Used to tell player to move to avoid friendly fire
-    std::string tmp_talk_move[10] = {
-    _("Move"),
-    _("Move your ass"),
-    _("Get out of the way"),
-    _("You need to move"),
-    _("Hey <name_g>, move"),
-    _("<swear> move it"),
-    _("Move your <swear> ass"),
-    _("Get out of my way, <name_b>,"),
-    _("Move to the side"),
-    _("Get out of my line of fire")
-    };
-    for(int j=0; j<10; j++) {talk_move[j] = tmp_talk_move[j];}
-
-    std::string tmp_talk_done_mugging[10] = {
-    _("Thanks for the cash, <name_b>!"),
-    _("So long, <name_b>!"),
-    _("Thanks a lot, <name_g>!"),
-    _("Catch you later, <name_g>!"),
-    _("See you later, <name_b>!"),
-    _("See you in hell, <name_b>!"),
-    _("Hasta luego, <name_g>!"),
-    _("I'm outta here! <done_mugging>"),
-    _("Bye bye, <name_b>!"),
-    _("Thanks, <name_g>!")
-    };
-    for(int j=0; j<10; j++) {talk_done_mugging[j] = tmp_talk_done_mugging[j];}
-
-
-    std::string tmp_talk_leaving[10] = {
-    _("So long, <name_b>!"),
-    _("Hasta luego, <name_g>!"),
-    _("I'm outta here!"),
-    _("Bye bye, <name_b>!"),
-    _("So long, <name_b>!"),
-    _("Hasta luego, <name_g>!"),
-    _("I'm outta here!"),
-    _("Bye bye, <name_b>!"),
-    _("I'm outta here!"),
-    _("Bye bye, <name_b>!")
-    };
-    for(int j=0; j<10; j++) {talk_leaving[j] = tmp_talk_leaving[j];}
-
-    std::string tmp_talk_catch_up[10] = {
-    _("You're too far away, <name_b>!"),
-    _("Hurry up, <name_g>!"),
-    _("I'm outta here soon!"),
-    _("Come on molasses!"),
-    _("What's taking so long?"),
-    _("Get with the program laggard!"),
-    _("Did the zombies get you?"),
-    _("Wait up <name_b>!"),
-    _("Did you evolve from a snail?"),
-    _("How 'bout picking up the pace!")
-    };
-    for(int j=0; j<10; j++) {talk_catch_up[j] = tmp_talk_catch_up[j];}
+    return texts[type];
 }
 
-void npc::talk_to_u()
+/** Time (in turns) and cost (in cent) for training: */
+time_duration calc_skill_training_time( const npc &p, const skill_id &skill )
 {
-    // This is necessary so that we don't bug the player over and over
-    if (attitude == NPCATT_TALK) {
-        attitude = NPCATT_NULL;
-    } else if (attitude == NPCATT_FLEE) {
-        add_msg(_("%s is fleeing from you!"), name.c_str());
+    return 1_minutes + 5_turns * g->u.get_skill_level( skill ) -
+           1_turns * p.get_skill_level( skill );
+}
+
+int calc_skill_training_cost( const npc &p, const skill_id &skill )
+{
+    if( p.is_friend() ) {
+        return 0;
+    }
+
+    return 1000 * ( 1 + g->u.get_skill_level( skill ) ) * ( 1 + g->u.get_skill_level( skill ) );
+}
+
+// TODO: all styles cost the same and take the same time to train,
+// maybe add values to the ma_style class to makes this variable
+// TODO: maybe move this function into the ma_style class? Or into the NPC class?
+time_duration calc_ma_style_training_time( const npc &, const matype_id & /* id */ )
+{
+    return 30_minutes;
+}
+
+int calc_ma_style_training_cost( const npc &p, const matype_id & /* id */ )
+{
+    if( p.is_friend() ) {
+        return 0;
+    }
+
+    return 800;
+}
+
+// Rescale values from "mission scale" to "opinion scale"
+int cash_to_favor( const npc &, int cash )
+{
+    // TODO: It should affect different NPCs to a different degree
+    // Square root of mission value in dollars
+    // ~31 for zed mom, 50 for horde master, ~63 for plutonium cells
+    double scaled_mission_val = sqrt( cash / 100.0 );
+    return roll_remainder( scaled_mission_val );
+}
+
+void game::chat()
+{
+    const std::vector<npc *> available = get_npcs_if( [&]( const npc & guy ) {
+        // TODO: Get rid of the z-level check when z-level vision gets "better"
+        return u.posz() == guy.posz() &&
+               u.sees( guy.pos() ) &&
+               rl_dist( u.pos(), guy.pos() ) <= SEEX * 2;
+    } );
+    const std::vector<npc *> followers = get_npcs_if( [&]( const npc & guy ) {
+        return guy.is_friend() && guy.is_following() && u.posz() == guy.posz() &&
+               u.sees( guy.pos() ) && rl_dist( u.pos(), guy.pos() ) <= SEEX * 2;
+    } );
+    const std::vector<npc *> guards = get_npcs_if( [&]( const npc & guy ) {
+        return guy.mission == NPC_MISSION_GUARD_ALLY &&
+               guy.companion_mission_role_id != "FACTION_CAMP" && u.posz() == guy.posz() &&
+               u.sees( guy.pos() ) && rl_dist( u.pos(), guy.pos() ) <= SEEX * 2;
+    } );
+
+    uilist nmenu;
+    nmenu.text = std::string( _( "Who do you want to talk to or yell at?" ) );
+
+    int i = 0;
+
+    for( auto &elem : available ) {
+        nmenu.addentry( i++, true, MENU_AUTOASSIGN, ( elem )->name );
+    }
+
+    int yell = 0;
+    int yell_sentence = 0;
+    int yell_guard = -1;
+    int yell_follow = -1;
+    int yell_awake = -1;
+    int yell_sleep = -1;
+    int yell_flee = -1;
+    int yell_stop = -1;
+
+    nmenu.addentry( yell = i++, true, 'a', _( "Yell" ) );
+    nmenu.addentry( yell_sentence = i++, true, 'b', _( "Yell a sentence" ) );
+    if( !followers.empty() ) {
+        nmenu.addentry( yell_guard = i++, true, 'g', _( "Tell all your allies to guard" ) );
+        nmenu.addentry( yell_awake = i++, true, 'w', _( "Tell all your allies to stay awake" ) );
+        nmenu.addentry( yell_sleep = i++, true, 's',
+                        _( "Tell all your allies to relax and sleep when tired" ) );
+        nmenu.addentry( yell_flee = i++, true, 'R', _( "Tell all your allies to flee" ) );
+        nmenu.addentry( yell_stop = i++, true, 'S', _( "Tell all your allies stop running" ) );
+    }
+    if( !guards.empty() ) {
+        nmenu.addentry( yell_follow = i++, true, 'f', _( "Tell all your allies to follow" ) );
+    }
+
+    nmenu.query();
+    if( nmenu.ret < 0 ) {
         return;
-    } else if (attitude == NPCATT_KILL) {
-        add_msg(_("%s is hostile!"), name.c_str());
+    } else if( nmenu.ret == yell ) {
+        u.shout( _( "yourself shouting loudly!" ) );
+    } else if( nmenu.ret == yell_sentence ) {
+        std::string popupdesc = string_format( _( "Enter a sentence to yell" ) );
+        string_input_popup popup;
+        popup.title( string_format( _( "Yell a sentence" ) ) )
+        .width( 64 )
+        .description( popupdesc )
+        .identifier( "sentence" )
+        .max_length( 128 )
+        .query();
+        std::string sentence = popup.text();
+        add_msg( _( "You yell, \"%s\"" ), sentence );
+        u.shout( string_format( _( "%s yelling \"%s\"" ), u.disp_name(), sentence ) );
+    } else if( nmenu.ret == yell_guard ) {
+        for( npc *p : followers ) {
+            talk_function::assign_guard( *p );
+        }
+        u.shout( _( "Guard here!" ) );
+    } else if( nmenu.ret == yell_awake ) {
+        for( npc *p : followers ) {
+            talk_function::wake_up( *p );
+        }
+        u.shout( _( "Stay awake!" ) );
+    } else if( nmenu.ret == yell_sleep ) {
+        for( npc *p : followers ) {
+            p->rules.set_flag( ally_rule::allow_sleep );
+        }
+        u.shout( _( "We're safe!  Take a nap if you're tired." ) );
+    } else if( nmenu.ret == yell_follow ) {
+        for( npc *p : guards ) {
+            talk_function::stop_guard( *p );
+        }
+        u.shout( _( "Follow me!" ) );
+    } else if( nmenu.ret == yell_flee ) {
+        for( npc *p : followers ) {
+            p->rules.set_flag( ally_rule::avoid_combat );
+        }
+        u.shout( _( "Fall back to safety!  Flee, you fools!" ) );
+    } else if( nmenu.ret == yell_stop ) {
+        for( npc *p : followers ) {
+            p->rules.clear_flag( ally_rule::avoid_combat );
+        }
+        u.shout( _( "No need to run any more, we can fight here." ) );
+    } else if( nmenu.ret <= static_cast<int>( available.size() ) ) {
+        available[nmenu.ret]->talk_to_u();
+    } else {
+        return;
+    }
+
+    u.moves -= 100;
+    refresh_all();
+}
+
+void npc::handle_sound( int priority, const std::string &description, int heard_volume,
+                        const tripoint &spos )
+{
+    if( sees( spos ) ) {
+        return;
+    }
+    // ignore low priority sounds if the NPC "knows" it came from a friend.
+    // @ todo NPC will need to respond to talking noise eventually
+    // but only for bantering purposes, not for investigating.
+    npc *const sound_source = g->critter_at<npc>( spos );
+    if( sound_source ) {
+        if( ( my_fac == sound_source->my_fac ||
+              get_attitude_group( get_attitude() ) == sound_source->get_attitude_group(
+                  sound_source->get_attitude() ) ) && ( priority < 6 ) ) {
+            add_msg( m_debug, "NPC ignored same faction %s", name.c_str() );
+            return;
+        }
+    }
+    // discount if sound source is player, or seen by player, and listener is friendly and sound source is combat or alert only.
+    if( ( priority < 7 ) && g->u.sees( spos ) && ( is_friend() ||
+            mission == NPC_MISSION_GUARD_ALLY ) ) {
+        add_msg( m_debug, "NPC %s ignored low priority noise that player can see", name.c_str() );
+        return;
+        // discount if sound source is player, or seen by player, listener is neutral and sound type is worth investigating.
+    } else if( priority < 6 && get_attitude_group( get_attitude() ) != attitude_group::hostile &&
+               g->u.sees( spos ) ) {
+        return;
+    }
+    // patrolling guards will investigate more readily than stationary NPCS
+    int investigate_dist = 10;
+    if( mission == NPC_MISSION_GUARD_ALLY || mission == NPC_MISSION_GUARD_PATROL ) {
+        investigate_dist = 50;
+    }
+    if( priority > 3 && ai_cache.total_danger < 1.0f && rl_dist( pos(), spos ) < investigate_dist ) {
+        add_msg( m_debug, "NPC %s added noise at pos %d, %d", name.c_str(), spos.x, spos.y );
+        dangerous_sound temp_sound;
+        temp_sound.pos = spos;
+        temp_sound.volume = heard_volume;
+        temp_sound.type = priority;
+        if( !ai_cache.sound_alerts.empty() ) {
+            if( ai_cache.sound_alerts.back().pos != spos ) {
+                ai_cache.sound_alerts.push_back( temp_sound );
+            }
+        } else {
+            ai_cache.sound_alerts.push_back( temp_sound );
+        }
+    }
+    add_msg( m_debug, "%s heard '%s', priority %d at volume %d from %d:%d, my pos %d:%d",
+             disp_name(), description, priority, heard_volume, spos.x, spos.y, pos().x, pos().y );
+    switch( priority ) {
+        case 4: //
+            warn_about( "speech_noise", rng( 1, 10 ) * 1_minutes );
+            break;
+        case 5:
+        case 6:
+        case 7:
+        case 8: // combat noise is only worth comment if we're not fighting
+        case 9:
+            // TODO: Brave NPCs should be less jumpy
+            if( ai_cache.total_danger < 1.0f ) {
+                warn_about( "combat_noise", rng( 1, 10 ) * 1_minutes );
+            }
+            break;
+        case 3: // movement is is only worth comment if we're not fighting and out of a vehicle
+            if( ai_cache.total_danger < 1.0f && !in_vehicle ) {
+                warn_about( "movement_noise", rng( 1, 10 ) * 1_minutes, description );
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void npc_chatbin::check_missions()
+{
+    // TODO: or simply fail them? Some missions might only need to be reported.
+    auto &ma = missions_assigned;
+    const auto last = std::remove_if( ma.begin(), ma.end(), []( class mission const * m ) {
+        return !m->is_assigned();
+    } );
+    std::copy( last, ma.end(), std::back_inserter( missions ) );
+    ma.erase( last, ma.end() );
+}
+
+void npc::talk_to_u( bool text_only, bool radio_contact )
+{
+    if( g->u.is_dead_state() ) {
+        set_attitude( NPCATT_NULL );
+        return;
+    }
+    const bool has_mind_control = g->u.has_trait( trait_DEBUG_MIND_CONTROL );
+    // This is necessary so that we don't bug the player over and over
+    if( get_attitude() == NPCATT_TALK ) {
+        set_attitude( NPCATT_NULL );
+    } else if( !has_mind_control && ( get_attitude() == NPCATT_FLEE ||
+                                      get_attitude() == NPCATT_FLEE_TEMP ) ) {
+        add_msg( _( "%s is fleeing from you!" ), name );
+        return;
+    } else if( !has_mind_control && get_attitude() == NPCATT_KILL ) {
+        add_msg( _( "%s is hostile!" ), name );
         return;
     }
     dialogue d;
     d.alpha = &g->u;
     d.beta = this;
 
-    d.topic_stack.push_back(chatbin.first_topic);
+    chatbin.check_missions();
 
-    if (is_leader()) {
-        d.topic_stack.push_back(TALK_LEADER);
-    } else if (is_friend()) {
-        d.topic_stack.push_back(TALK_FRIEND);
+    for( auto &mission : chatbin.missions_assigned ) {
+        if( mission->get_assigned_player_id() == g->u.getID() ) {
+            d.missions_assigned.push_back( mission );
+        }
+    }
+
+    d.add_topic( chatbin.first_topic );
+    if( radio_contact ) {
+        d.add_topic( "TALK_RADIO" );
+    } else if( is_leader() ) {
+        d.add_topic( "TALK_LEADER" );
+    } else if( is_friend() ) {
+        d.add_topic( "TALK_FRIEND" );
     }
 
     int most_difficult_mission = 0;
-    for (size_t i = 0; i < chatbin.missions.size(); i++) {
-        mission_type *type = g->find_mission_type(chatbin.missions[i]);
-        if (type->urgent && type->difficulty > most_difficult_mission) {
-            d.topic_stack.push_back(TALK_MISSION_DESCRIBE);
-            chatbin.mission_selected = i;
-            most_difficult_mission = type->difficulty;
+    for( auto &mission : chatbin.missions ) {
+        const auto &type = mission->get_type();
+        if( type.urgent && type.difficulty > most_difficult_mission ) {
+            d.add_topic( "TALK_MISSION_DESCRIBE_URGENT" );
+            chatbin.mission_selected = mission;
+            most_difficult_mission = type.difficulty;
         }
     }
     most_difficult_mission = 0;
     bool chosen_urgent = false;
-    for (size_t i = 0; i < chatbin.missions_assigned.size(); i++) {
-        mission_type *type = g->find_mission_type(chatbin.missions_assigned[i]);
-        if ((type->urgent && !chosen_urgent) || (type->difficulty > most_difficult_mission &&
-              (type->urgent || !chosen_urgent))) {
-            chosen_urgent = type->urgent;
-            d.topic_stack.push_back(TALK_MISSION_INQUIRE);
-            chatbin.mission_selected = i;
-            most_difficult_mission = type->difficulty;
+    for( auto &mission : chatbin.missions_assigned ) {
+        if( mission->get_assigned_player_id() != g->u.getID() ) {
+            // Not assigned to the player that is currently talking to the npc
+            continue;
+        }
+        const auto &type = mission->get_type();
+        if( ( type.urgent && !chosen_urgent ) || ( type.difficulty > most_difficult_mission &&
+                ( type.urgent || !chosen_urgent ) ) ) {
+            chosen_urgent = type.urgent;
+            d.add_topic( "TALK_MISSION_INQUIRE" );
+            chatbin.mission_selected = mission;
+            most_difficult_mission = type.difficulty;
+        }
+    }
+    if( chatbin.mission_selected != nullptr ) {
+        if( chatbin.mission_selected->get_assigned_player_id() != g->u.getID() ) {
+            // Don't talk about a mission that is assigned to someone else.
+            chatbin.mission_selected = nullptr;
+        }
+    }
+    if( chatbin.mission_selected == nullptr ) {
+        // if possible, select a mission to talk about
+        if( !chatbin.missions.empty() ) {
+            chatbin.mission_selected = chatbin.missions.front();
+        } else if( !d.missions_assigned.empty() ) {
+            chatbin.mission_selected = d.missions_assigned.front();
         }
     }
 
-    if (d.topic_stack.back() == TALK_NONE) {
-        d.topic_stack.back() = pick_talk_topic(&(g->u));
+    // Needs
+    if( has_effect( effect_sleep ) || has_effect( effect_lying_down ) ) {
+        if( has_effect( effect_narcosis ) ) {
+            d.add_topic( "TALK_SEDATED" );
+        } else {
+            d.add_topic( "TALK_WAKE_UP" );
+        }
+    }
+
+    if( d.topic_stack.back().id == "TALK_NONE" ) {
+        d.topic_stack.back() = talk_topic( pick_talk_topic( g->u ) );
     }
 
     moves -= 100;
 
-    if(g->u.is_deaf()) {
-        add_msg(_("%s tries to talk to you, but you're deaf!"), name.c_str());
-        if(d.topic_stack.back() == TALK_MUG) {
-            add_msg(_("When you don't respond, %s becomes angry!"), name.c_str());
+    if( g->u.is_deaf() ) {
+        if( d.topic_stack.back().id == "TALK_MUG" ||
+            d.topic_stack.back().id == "TALK_STRANGER_AGGRESSIVE" ) {
             make_angry();
+            d.add_topic( "TALK_DEAF_ANGRY" );
+        } else {
+            d.add_topic( "TALK_DEAF" );
         }
-        return;
     }
 
     decide_needs();
 
-    d.win = newwin(FULL_SCREEN_HEIGHT, FULL_SCREEN_WIDTH,
-                    (TERMY > FULL_SCREEN_HEIGHT) ? (TERMY-FULL_SCREEN_HEIGHT) / 2 : 0,
-                    (TERMX > FULL_SCREEN_WIDTH) ? (TERMX-FULL_SCREEN_WIDTH) / 2 : 0);
-    draw_border(d.win);
-    mvwvline(d.win, 1, (FULL_SCREEN_WIDTH / 2) + 1, LINE_XOXO, FULL_SCREEN_HEIGHT - 1);
-    mvwputch(d.win, 0, (FULL_SCREEN_WIDTH / 2) + 1, BORDER_COLOR, LINE_OXXX);
-    mvwputch(d.win, FULL_SCREEN_HEIGHT - 1, (FULL_SCREEN_WIDTH / 2) + 1, BORDER_COLOR, LINE_XXOX);
-    mvwprintz(d.win, 1,  1, c_white, _("Dialogue with %s"), name.c_str());
-    mvwprintz(d.win, 1, (FULL_SCREEN_WIDTH / 2) + 3, c_white, _("Your response:"));
-
+    dialogue_window d_win;
+    d_win.open_dialogue( text_only );
     // Main dialogue loop
     do {
-        talk_topic next = d.opt(d.topic_stack.back());
-        if (next == TALK_NONE) {
-            int cat = topic_category(d.topic_stack.back());
+        d_win.print_header( name );
+        const talk_topic next = d.opt( d_win, d.topic_stack.back() );
+        if( next.id == "TALK_NONE" ) {
+            int cat = topic_category( d.topic_stack.back() );
             do {
                 d.topic_stack.pop_back();
-            } while (cat != -1 && topic_category(d.topic_stack.back()) == cat);
+            } while( cat != -1 && topic_category( d.topic_stack.back() ) == cat );
         }
-        if (next == TALK_DONE || d.topic_stack.empty()) {
+        if( next.id == "TALK_DONE" || d.topic_stack.empty() ) {
             d.done = true;
-        } else if (next != TALK_NONE) {
-            d.topic_stack.push_back(next);
+        } else if( next.id != "TALK_NONE" ) {
+            d.add_topic( next );
         }
-    } while (!d.done);
-    delwin(d.win);
+    } while( !d.done );
     g->refresh_all();
+
+    if( g->u.activity.id() == activity_id( "ACT_AIM" ) && !g->u.has_weapon() ) {
+        g->u.cancel_activity();
+        // don't query certain activities that are started from dialogue
+    } else if( g->u.activity.id() == activity_id( "ACT_TRAIN" ) ||
+               g->u.activity.id() == activity_id( "ACT_WAIT_NPC" ) ||
+               g->u.activity.id() == activity_id( "ACT_SOCIALIZE" ) ||
+               g->u.activity.index == getID() ) {
+        return;
+    }
+    g->cancel_activity_or_ignore_query( distraction_type::talked_to,
+                                        string_format( _( "%s talked to you." ), name ) );
 }
 
-std::string dynamic_line(talk_topic topic, npc *p)
+std::string dialogue::dynamic_line( const talk_topic &the_topic ) const
 {
-    talk_function effect;
-    // First, a sanity test for mission stuff
-    if (topic >= TALK_MISSION_START && topic <= TALK_MISSION_END) {
-        if (topic == TALK_MISSION_START) {
-            return "Used TALK_MISSION_START - not meant to be used!";
+    // For compatibility
+    const auto &topic = the_topic.id;
+    const auto iter = json_talk_topics.find( topic );
+    if( iter != json_talk_topics.end() ) {
+        const std::string line = iter->second.get_dynamic_line( *this );
+        if( !line.empty() ) {
+            return line;
         }
-        if (topic == TALK_MISSION_END) {
-            return "Used TALK_MISSION_END - not meant to be used!";
-        }
-
-        if (p->chatbin.mission_selected == -1) {
-            return "mission_selected = -1; BUG! (npctalk.cpp:dynamic_line)";
-        }
-
-        int id = -1;
-        if (topic == TALK_MISSION_INQUIRE || topic == TALK_MISSION_ACCEPTED ||
-            topic == TALK_MISSION_SUCCESS || topic == TALK_MISSION_ADVICE ||
-            topic == TALK_MISSION_FAILURE || topic == TALK_MISSION_SUCCESS_LIE) {
-            if (p->chatbin.mission_selected >= (int)p->chatbin.missions_assigned.size()) {
-                return "mission_selected is too high; BUG! (npctalk.cpp:dynamic_line)";
-            }
-            id = p->chatbin.missions_assigned[p->chatbin.mission_selected];
-        } else {
-            if (p->chatbin.mission_selected >= (int)p->chatbin.missions.size()) {
-                return "mission_selected is too high; BUG! (npctalk.cpp:dynamic_line (2))";
-            }
-            id = p->chatbin.missions[p->chatbin.mission_selected];
-        }
-
-        // Mission stuff is a special case, so we'll handle it up here
-        mission *miss = g->find_mission(id);
-        mission_type *type = miss->type;
-        std::string ret = mission_dialogue(mission_id(type->id), topic);
-        if (ret.empty()) {
-            debugmsg("Bug in npctalk.cpp:dynamic_line. Wrong mission_id(%d) or topic(%d)",
-                     mission_id(type->id), topic);
-            return "";
-        }
-
-        if (topic == TALK_MISSION_SUCCESS && miss->follow_up != MISSION_NULL) {
-            switch (rng(1,3)){
-                case 1:
-                    return ret + _("  And I have more I'd like you to do.");
-                case 2:
-                    return ret + _("  I could use a hand with something else if you are interested.");
-                case 3:
-                    return ret + _("  If you are interested, I have another job for you.");
-            }
-        }
-
-    return ret;
     }
 
-    switch (topic) {
-        case TALK_NONE:
-        case TALK_DONE:
+    if( topic == "TALK_DEAF" ) {
+        return _( "&You are deaf and can't talk." );
+
+    } else if( topic == "TALK_DEAF_ANGRY" ) {
+        return string_format(
+                   _( "&You are deaf and can't talk. When you don't respond, %s becomes angry!" ),
+                   beta->name );
+    }
+    if( topic == "TALK_SEDATED" ) {
+        return string_format(
+                   _( "%s is sedated and can't be moved or woken up until the medication or sedation wears off." ),
+                   beta->name );
+    }
+
+    const auto &p = beta; // for compatibility, later replace it in the code below
+    // Those topics are handled by the mission system, see there.
+    static const std::unordered_set<std::string> mission_topics = { {
+            "TALK_MISSION_DESCRIBE", "TALK_MISSION_DESCRIBE_URGENT",
+            "TALK_MISSION_OFFER", "TALK_MISSION_ACCEPTED",
+            "TALK_MISSION_REJECTED", "TALK_MISSION_ADVICE", "TALK_MISSION_INQUIRE",
+            "TALK_MISSION_SUCCESS", "TALK_MISSION_SUCCESS_LIE", "TALK_MISSION_FAILURE"
+        }
+    };
+    if( mission_topics.count( topic ) > 0 ) {
+        if( p->chatbin.mission_selected == nullptr ) {
+            return "mission_selected == nullptr; BUG! (npctalk.cpp:dynamic_line)";
+        }
+        mission *miss = p->chatbin.mission_selected;
+        const auto &type = miss->get_type();
+        // TODO: make it a member of the mission class, maybe at mission instance specific data
+        const std::string &ret = miss->dialogue_for_topic( topic );
+        if( ret.empty() ) {
+            debugmsg( "Bug in npctalk.cpp:dynamic_line. Wrong mission_id(%s) or topic(%s)",
+                      type.id.c_str(), topic.c_str() );
             return "";
+        }
 
-        case TALK_GUARD:
-            switch (rng(1,5)){
-            case 1:
-                return _("I'm not in charge here, you're looking for someone else...");
-            case 2:
-                return _("Keep civil or I'll bring the pain.");
-            case 3:
-                return _("Just on watch, move along.");
-            case 4:
-                if (g->u.male)
-                    return _("Sir.");
-                else
-                    return _("Ma'am");
-            case 5:
-                if (g->u.male)
-                    return _("Rough out there, isn't it?");
-                else
-                    return _("Ma'am, you really shouldn't be traveling out there.");
-            //}
-            //else {
-            //    return _("Keep civil or I'll bring the pain.");
+        if( topic == "TALK_MISSION_SUCCESS" && miss->has_follow_up() ) {
+            switch( rng( 1, 3 ) ) {
+                case 1:
+                    return ret + _( "  And I have more I'd like you to do." );
+                case 2:
+                    return ret + _( "  I could use a hand with something else if you are interested." );
+                case 3:
+                    return ret + _( "  If you are interested, I have another job for you." );
             }
-
-        case TALK_MISSION_LIST:
-            if (p->chatbin.missions.empty()) {
-                if (p->chatbin.missions_assigned.empty()) {
-                    return _("I don't have any jobs for you.");
-                } else {
-                    return _("I don't have any more jobs for you.");
-                }
-            } else if (p->chatbin.missions.size() == 1) {
-                if (p->chatbin.missions_assigned.empty()) {
-                    return _("I just have one job for you.  Want to hear about it?");
-                } else {
-                    return _("I have another job for you.  Want to hear about it?");
-                }
-            } else if (p->chatbin.missions_assigned.empty()) {
-                return _("I have several jobs for you.  Which should I describe?");
-            } else {
-                return _("I have several more jobs for you.  Which should I describe?");
-            }
-
-        case TALK_MISSION_LIST_ASSIGNED:
-            if (p->chatbin.missions_assigned.empty()) {
-                return _("You're not working on anything for me right now.");
-            } else if (p->chatbin.missions_assigned.size() == 1) {
-                return _("What about it?");
-            } else {
-                return _("Which job?");
-            }
-
-        case TALK_MISSION_REWARD:
-            return _("Sure, here you go!");
-
-        case TALK_EVAC_MERCHANT:
-            if (g->u.is_wearing("badge_marshal"))
-                return _("Welcome marshal...");
-            return _("Welcome...");
-
-        case TALK_EVAC_MERCHANT_NEW:
-            return _("Before you say anything else, we're full.  Few days ago we had an outbreak due to lett'n in too many new refugees."
-                     "  We do desperately need supplies and are willing to trade what we can for it.  Pay top dollar for jerky if you have any.");
-
-        case TALK_EVAC_MERCHANT_PLANS:
-            return _("To be honest, we started out with six buses full of office workers and soccer moms... after the refugee outbreak a day or two"
-                    " ago the more courageous ones in our party ended up dead.  The only thing we want now is to run enough trade through"
-                    " here to keep us alive.  Don't care who your goods come from or how you got them, just don't bring trouble.");
-
-        case TALK_EVAC_MERCHANT_PLANS2:
-            return _("I'm sorry, but the only way we're going to make it is if we keep our gates buttoned fast.  The guards in the basement "
-                    "have orders to shoot on sight, if you so much as peep your head in the lower levels.  I don't know what made the scavengers "
-                    "out there so ruthless but some of us have had to kill our own bloody kids... don't even think about strong arming us.");
-
-        case TALK_EVAC_MERCHANT_PLANS3:
-            return _("Well the refugees were staying here on the first floor when one their parties tried to sneak a dying guy in through the loading bay, "
-                     "we ended up being awoken to shrieks and screams. Maybe two dozen people died that night.  The remaining refugees were banished the next "
-                     "day and went on to form a couple of scavenging bands.  I'd say we got twenty decent men or women still here but our real strength comes "
-                     "from all of our business partners that are accustomed to doing whatever is needed to survive.");
-
-        case TALK_EVAC_MERCHANT_WORLD:
-            return _("Can't say we've heard much.  Most these shelters seemed to have been designed to make people feel safer... not actually "
-                    "aid in their survival.  Our radio equipment is utter garbage that someone convinced the government to buy, with no intention "
-                    "of it ever being used.  From the passing scavengers I've heard nothing but prime loot'n spots and rumors of hordes.");
-
-        case TALK_EVAC_MERCHANT_HORDES:
-            return _("Had one guy pop in here a while back saying he had tried to drive into Syracuse after the outbreak.  Didn't even make it "
-                     "downtown before he ran into a wall of the living dead that could stop a tank.  He hightailed it out but claims there were "
-                     "several thousand at least.  Guess when you get a bunch of them together they end up making enough noise to attract everyone "
-                     "in the neighborhood.  Luckily we haven't had a mob like that pass by here.");
-
-        case TALK_EVAC_MERCHANT_PRIME_LOOT:
-            return _("Well, there is a party of about a dozen 'scavengers' that found some sort of government facility.  They bring us a literal "
-                     "truck load of jumpsuits, m4's, and canned food every week or so.  Since some of those guys got family here, we've been "
-                     "doing alright.  As to where it is, I don't have the foggiest of ideas.");
-
-        case TALK_EVAC_MERCHANT_ASK_JOIN:
-            return _("Sorry, last thing we need is another mouth to feed.  Most of us lack any real survival skills so keeping our group "
-                     "small enough to survive on the food random scavengers bring to trade with us is important.");
-
-        case TALK_EVAC_MERCHANT_NO:
-            return _("I'm sorry, not a risk we are willing to take right now.");
-
-        case TALK_EVAC_MERCHANT_HELL_NO:
-            return _("There isn't a chance in hell!  We had one guy come in here with bloody fur all over his body... well I guess that isn't all that "
-                     "strange but I'm pretty sure whatever toxic waste is still out there is bound to mutate more than just his hair.");
-
-        case TALK_EVAC_GUARD1:
-            if (g->u.is_wearing("badge_marshal"))
-                return _("Hello marshal.");
-            return _("Hello there.");
-
-        case TALK_EVAC_GUARD1_PLACE:
-            return _("This is a refugee center that we've made into a sort of trading hub.");
-
-        case TALK_EVAC_GUARD1_GOVERNMENT:
-            return _("Ha ha ha, no. Though there is Old Guard somewhere around here if you have any questions "
-                     "relating to what the government is up to.");
-
-        case TALK_EVAC_GUARD1_TRADE:
-            return _("Anything valuable really. If you really want to know, go ask one of the actual traders. I'm just protection.");
-
-        case TALK_EVAC_GUARD1_JOIN:
-            return _("Nope.");
-
-        case TALK_EVAC_GUARD1_JOIN2:
-            return _("Death is pretty blunt.");
-
-        case TALK_EVAC_GUARD1_JOIN3:
-            return _("Nope.");
-
-        case TALK_EVAC_GUARD1_ATTITUDE:
-            return _("Then leave, you have two feet.");
-
-        case TALK_EVAC_GUARD1_JOB:
-            return _("Uh, not really. Go talk to a merchant if you have anything to sell. Otherwise the Old Guard liaison "
-                     "might have something, if you can find him.");
-
-        case TALK_EVAC_GUARD1_OLDGUARD:
-            return _("That's just our nickname for them. They're what's left of the federal government.  "
-                     "Don't know how legitimate they are but they are named after some military unit "
-                     "that once protected the president.  Their liaison is usually hanging around "
-                     "here somewhere.");
-
-        case TALK_EVAC_GUARD1_BYE:
-            return _("Stay safe out there. Hate to have to kill you after you've already died.");
-
-        case TALK_EVAC_GUARD2:
-            if (g->u.is_wearing("badge_marshal"))
-                return _("Hello marshal.");
-            return _("Hello.");
-
-        case TALK_EVAC_GUARD2_NEW:
-            return _("Yes of course. Just don't bring any trouble and it's all fine by me.");
-
-        case TALK_EVAC_GUARD2_RULES:
-            return _("Well mostly no. Just don't go around robbing others and starting fights "
-                     "and you will be all set. Also, don't go into the basement. Outsiders "
-                     "are not allowed in there.");
-
-        case TALK_EVAC_GUARD2_RULES_BASEMENT:
-            return _("In short, we had a problem when a sick refugee died and turned "
-                     "into a zombie.  We had to expel the refugees and most of our "
-                     "surviving group now stays to the basement to prevent it from "
-                     "happening again. Unless you really prove your worth I don't "
-                     "foresee any exceptions to that rule.");
-
-         case TALK_EVAC_GUARD2_WHO:
-            return _("Most are scavengers like you.  They now make a living by "
-                     "looting the cities in search for anything useful: food, "
-                     "weapons, tools, gasoline. In exchange for their findings "
-                     "we offer them a temporary place to rest and the services "
-                     "of our shop. I bet some of them would be willing to organize "
-                     "resource runs with you if you ask.");
-
-        case  TALK_EVAC_GUARD2_TRADE:
-            return _("You are asking the wrong person, should look for our "
-                     "merchant by the main entrance. Perhaps one of the scavengers "
-                     "is also interested.");
-
-        case TALK_EVAC_GUARD3:
-            return _("Keep to yourself and you won't find any problems.");
-
-        case TALK_EVAC_GUARD3_NEW:
-            return _("I haven't been here for long but I do my best to watch who "
-                     "comes and goes.  You can't always predict who will bring trouble.");
-
-        case TALK_EVAC_GUARD3_RULES:
-            return _("Keep your head down and stay out of my way.");
-
-        case TALK_EVAC_GUARD3_HIDE1:
-            return _("Like what?");
-
-        case TALK_EVAC_GUARD3_HIDE2:
-            return _("You're new here, who the hell put you up to this crap?");
-
-        case TALK_EVAC_GUARD3_WASTE:
-            return _("If you don't get on with your business I'm going to have to "
-                     "ask you to leave and not come back.");
-
-        case TALK_EVAC_GUARD3_DEAD:
-            return _("That's it, you're dead!");
-
-        case TALK_EVAC_GUARD3_HOSTILE:
-            return _("You must really have a death wish!");
-
-        case TALK_EVAC_GUARD3_INSULT:
-            return _("We don't put-up with garbage like you, finish your business and "
-                     "get the hell out.");
-
-        case TALK_EVAC_HUNTER:
-            if (g->u.is_wearing("badge_marshal"))
-                return _("I thought I smelled a pig.  I jest... please don't arrest me.");
-            return _("Huh, thought I smelled someone new. Can I help you?");
-
-        case TALK_EVAC_HUNTER_SMELL:
-            return _("Oh, I didn't mean that in a bad way. Been out in the wilderness "
-                     "so long, I find myself noticing things by scent before sight.");
-
-        case TALK_EVAC_HUNTER_DO:
-            return _("I trade food here in exchange for a place to crash and general "
-                     "supplies. Well, more specifically I trade food that isn't stale "
-                     "chips and flat cola.");
-
-        case TALK_EVAC_HUNTER_LIFE:
-            return _("Not really, just trying to lead my life.");
-
-        case TALK_EVAC_HUNTER_HUNT:
-            return _("Yep. Whatever game I spot, I bag and sell the meat and other "
-                     "parts here. Got the occasional fish and basket full of wild "
-                     "fruit, but nothing comes close to a freshly-cooked moose steak "
-                     "for supper!");
-
-        case TALK_EVAC_HUNTER_SALE:
-            return _("Sure, just bagged a fresh batch of meat. You may want to grill "
-                     "it up before it gets too, uh... 'tender'. ");
-
-        case TALK_EVAC_HUNTER_ADVICE:
-            switch (rng(1,7)){
-            case 1:
-                return _("Feed a man a fish, he's full for a day. Feed a man a bullet, "
-                         "he's full for the rest of his life.");
-            case 2:
-                return _("Spot your prey before something nastier spots you.");
-            case 3:
-                return _("I've heard that cougars sometimes leap. Maybe it's just a myth.");
-            case 4:
-                return _("The Jabberwock is real, don't listen to what anybody else says. "
-                         "If you see it, RUN.");
-            case 5:
-                return _("Zombie animal meat isn't good for eating, but sometimes you "
-                         "might find usable fur on 'em.");
-            case 6:
-                return _("A steady diet of cooked meat and clean water will keep you "
-                         "alive forever, but your taste buds and your colon may start "
-                         "to get angry at you. Eat a piece of fruit every once in a while.");
-            case 7:
-                return _("Smoke crack to get more shit done.");
-            }
-
-        case TALK_EVAC_HUNTER_BYE:
-            return _("Watch your back out there.");
-
-        case TALK_OLD_GUARD_REP:
-            // The rep should know whether you're a sworn officer.
-            // TODO: wearing the badge w/o the trait => Bad Idea
-            if (g->u.has_trait("PROF_FED")) {
-                return _("Marshal...");
-            }
-            return _("Citizen...");
-
-        case TALK_OLD_GUARD_REP_NEW:
-             return _("I'm the region's federal liaison.  Most people here call us the 'Old Guard' and I rather like the sound of it.  "
-                      "Despite how things currently appear, the federal government was not entirely destroyed.  After the outbreak I was "
-                      "chosen to coordinate civilian and militia efforts in support of military operations.");
-
-        case TALK_OLD_GUARD_REP_NEW_DOING:
-             return _("I ensure that the citizens here have what they need to survive and protect themselves from raiders.  Keeping "
-                      "some form law is going to be the most important  element in rebuilding the world.  We do what we can to keep the "
-                      "'Free Merchants' here prospering and in return they have provided us with spare men and supplies when they can.");
-
-        case TALK_OLD_GUARD_REP_NEW_DOWNSIDE:
-             return _("Well... I was like any other civilian till they conscripted me so I'll tell it to you straight.  They're the "
-                      " best hope we got right now.  They are stretched impossibly thin but are willing to do what is needed to maintain "
-                      "order.  They don't care much about looters since they understand most everyone is dead, but if you have something "
-                      "they need... you WILL give it to them.  Since most survivors have have nothing they want, they are welcomed as champions.");
-
-        case TALK_OLD_GUARD_REP_WORLD:
-             return _("There isn't much pushed out by public relations that I'd actually believe.  From what I gather, communication "
-                      "between the regional force commands is almost non-existent.  What I do know is that the 'Old Guard' is currently "
-                      "based out of the 2nd Fleet and patrols the Atlantic coast trying to provide support to the remaining footholds.");
-
-        case TALK_OLD_GUARD_REP_WORLD_2NDFLEET:
-             return _("I don't know much about how it formed but it is the armada of military and commercial ships that's floating off the "
-                      "coast.  They have everything from supertankers and carriers to fishing trawlers... even a few NATO ships.  Most civilians "
-                      "are offered a cabin on one of the liners to retire to if they serve as a federal employee for a few years.");
-
-        case TALK_OLD_GUARD_REP_WORLD_FOOTHOLDS:
-             return _("They may just be propaganda but apparently one or two cities were successful in 'walling themselves off.' Around "
-                      "here I was told that there were a few places like this one but I couldn't tell you where.");
-
-        case TALK_OLD_GUARD_REP_ASK_JOIN:
-             return _("You can't actually join unless you go through a recruiter.  We can usually use help though, ask me from time to time "
-                      "if there is any work available.  Completing missions as a contractor is a great way to make a name for yourself among "
-                      "the most powerful men left in the world.");
-
-        case TALK_ARSONIST:
-            if (g->u.is_wearing("badge_marshal"))
-                return _("That sure is a shiny badge you got there!");
-            return _("Heh, you look important.");
-
-        case TALK_ARSONIST_NEW:
-            return _("Guess that makes two of us. Well, kind of. I don't think we're open, though. Full up as hell; it's almost a crowd "
-                     "downstairs. See the trader over there? There's the one to ask.");
-
-        case TALK_ARSONIST_DOING:
-            return _("I burn down buildings and sell the Free Merchants the materials. No, seriously. If you've seen burned "
-                     "wreckage in place of suburbs or even see the pile of rebar for sale, that's probably me. They've kept "
-                     "me well off in exchange, I guess. I'll sell you a Molotov Cocktail or two, if you want.");
-
-        case TALK_ARSONIST_DOING_REBAR:
-            return _("Well, there's a guy downstairs who got a working pneumatic cannon. It shoots metal like... like a "
-                     "cannon without the bang. Cost-efficient as hell. And there's no shortage of improvised weapons you "
-                     "can make.  The big thing though, seems to be continuing construction of fortifications.  Very few of "
-                     "those monsters seem to be able to break through a fence or wall constructed with the stuff.");
-
-        case TALK_ARSONIST_WORLD:
-            return _("Nothing optimistic, at least. Had a pal on the road with a ham radio, but she's gone and so is that "
-                     "thing. Kaput.");
-
-        case TALK_ARSONIST_WORLD_OPTIMISTIC:
-            return _("Most of the emergency camps have dissolved by now. The cities are mobbed, the forests crawling with "
-                     "glowing eyes and zombies. Some insane shit out there, and everyone with a radio seems to feel like "
-                     "documenting their last awful moments.");
-
-        case TALK_ARSONIST_JOIN:
-            return _("I don't know. I mean, if you can make yourself useful. But that's become a real hazy thing nowadays."
-                     " It depends who you ask. The merchant definitely doesn't want me here when I'm not selling, but... "
-                     "some people get away with it.");
-
-        case TALK_ARSONIST_MUTATION:
-            return _("Ssh. Some people in here hate... mutations. This was an accident.");
-
-        case TALK_ARSONIST_MUTATION_INSULT:
-            return _("Screw You!");
-
-        case TALK_SCAVENGER_MERC:
-            if (g->u.is_wearing("badge_marshal"))
-                return _("I haven't done anything wrong...");
-            return _("...");
-
-        case TALK_SCAVENGER_MERC_NEW:
-             return _("I'm just a hired hand.  Someone pays me and I do what needs to be done.");
-
-        case TALK_SCAVENGER_MERC_TIPS:
-             return _("If you have to fight your way out of an ambush, the only thing that is going to save you is having a party that can "
-                      "return fire.  People who work alone are easy pickings for monsters and bandits.");
-
-        case TALK_SCAVENGER_MERC_HIRE:
-             return _("I'm currently waiting for a customer to return... I'll make you a deal though, "
-                      " $8,000 will cover my expenses if I get a small cut of the loot.");
-
-        case TALK_SCAVENGER_MERC_HIRE_SUCCESS:
-             return _("I guess you're the boss.");
-
-        case TALK_FREE_MERCHANT_STOCKS:
-             return _("Hope you're here to trade.");
-
-        case TALK_FREE_MERCHANT_STOCKS_NEW:
-             return _("I oversee the food stocks for the center.  There was significant looting during "
-                      "the panic when we first arrived so most of our food was carried away.  I manage "
-                      "what we have left and do everything I can to increase our supplies.  Rot and mold "
-                      "are more significant in the damp basement so I prioritize non-perishable food, "
-                      "such as cornmeal, jerky, and fruit wine.");
-
-        case TALK_FREE_MERCHANT_STOCKS_WHY:
-             return _("All three are easy to locally produce in significant quantities and are "
-                      "non-perishable.  We have a local farmer or two and a few hunter types that have "
-                      "been making attempts to provide us with the nutritious supplies.  We do always "
-                      "need more suppliers though.  Because this stuff is rather cheap in bulk I can "
-                      "pay a premium for any you have on you.  Canned food and other edibles are "
-                      "handled by the merchant in the front.");
-
-        case TALK_FREE_MERCHANT_STOCKS_ALL:
-             return _("I'm actually accepting a number of different foodstuffs: homebrew beer, sugar, flour, "
-                      "smoked meat, smoked fish, cooking oil; and as mentioned before, jerky, cornmeal, "
-                      "and fruit wine.");
-
-        case TALK_FREE_MERCHANT_STOCKS_JERKY:
-            return effect.bulk_trade_inquire(p, "jerky");
-
-        case TALK_FREE_MERCHANT_STOCKS_CORNMEAL:
-            return effect.bulk_trade_inquire(p, "cornmeal");
-
-        case TALK_FREE_MERCHANT_STOCKS_WINE:
-            return effect.bulk_trade_inquire(p, "fruit_wine");
-
-        case TALK_FREE_MERCHANT_STOCKS_FLOUR:
-            return effect.bulk_trade_inquire(p, "flour");
-
-        case TALK_FREE_MERCHANT_STOCKS_SUGAR:
-            return effect.bulk_trade_inquire(p, "sugar");
-
-        case TALK_FREE_MERCHANT_STOCKS_BEER:
-            return effect.bulk_trade_inquire(p, "hb_beer");
-
-        case TALK_FREE_MERCHANT_STOCKS_SMMEAT:
-            return effect.bulk_trade_inquire(p, "meat_smoked");
-
-        case TALK_FREE_MERCHANT_STOCKS_SMFISH:
-            return effect.bulk_trade_inquire(p, "fish_smoked");
-
-        case TALK_FREE_MERCHANT_STOCKS_OIL:
-            return effect.bulk_trade_inquire(p, "cooking_oil");
-
-        case TALK_FREE_MERCHANT_STOCKS_DELIVERED:
-             return _("Thank you for your business!");
-
-        case TALK_SHELTER:
-            switch (rng(1, 2)) {
-                case 1: return _("Well, I guess it's just us.");
-                case 2: return _("At least we've got shelter.");
-            }
-
-        case TALK_SHELTER_PLANS:
-            return _("I don't know, look for supplies and other survivors I guess.");
-
-        case TALK_SHARE_EQUIPMENT:
-            if (p->has_disease(_("asked_for_item"))) {
-                return _("You just asked me for stuff; ask later.");
-            }
-            return _("Why should I share my equipment with you?");
-
-        case TALK_GIVE_EQUIPMENT:
-            return _("Okay, here you go.");
-
-        case TALK_DENY_EQUIPMENT:
-            if (p->op_of_u.anger >= p->hostile_anger_level() - 4) {
-                return _("<no>, and if you ask again, <ill_kill_you>!");
-            } else {
-                return _("<no><punc> <fuck_you>!");
-            }
-
-        case TALK_TRAIN:
-            {
-                if( !g->u.backlog.empty() && g->u.backlog.front().type == ACT_TRAIN ) {
-                return _("Shall we resume?");
-            }
-            std::vector<Skill*> trainable = p->skills_offered_to(&(g->u));
-            std::vector<matype_id> styles = p->styles_offered_to(&(g->u));
-            if (trainable.empty() && styles.empty()) {
-                return _("Sorry, but it doesn't seem I have anything to teach you.");
-            } else {
-                return _("Here's what I can teach you...");
-            }
-            }
-            break;
-
-        case TALK_TRAIN_START:
-            if (g->cur_om->is_safe(g->om_location().x, g->om_location().y, g->levz)) {
-                return _("Alright, let's begin.");
-            } else {
-                return _("It's not safe here.  Let's get to safety first.");
-            }
-            break;
-
-        case TALK_TRAIN_FORCE:
-            return _("Alright, let's begin.");
-
-        case TALK_SUGGEST_FOLLOW:
-            if (p->has_disease(_("infection"))) {
-                return _("Not until I get some antibiotics...");
-            }
-            if (p->has_disease(_("asked_to_follow"))) {
-                return _("You asked me recently; ask again later.");
-            }
-            return _("Why should I travel with you?");
-
-        case TALK_AGREE_FOLLOW:
-            return _("You got it, I'm with you!");
-
-        case TALK_DENY_FOLLOW:
-            return _("Yeah... I don't think so.");
-
-        case TALK_LEADER:
-            return _("What is it?");
-
-        case TALK_LEAVE:
-            return _("You're really leaving?");
-
-        case TALK_PLAYER_LEADS:
-            return _("Alright.  You can lead now.");
-
-        case TALK_LEADER_STAYS:
-            return _("No.  I'm the leader here.");
-
-        case TALK_HOW_MUCH_FURTHER:
-            {
-            // TODO: this ignores the z-component
-            const tripoint player_pos = g->om_global_location();
-            int dist = rl_dist(player_pos.x, player_pos.y, p->goal.x, p->goal.y);
-            std::stringstream response;
-            dist *= 100;
-            if (dist >= 1300) {
+        }
+
+        return ret;
+    }
+
+    if( topic == "TALK_NONE" || topic == "TALK_DONE" ) {
+        return _( "Bye." );
+    } else if( topic == "TALK_DELIVER_ASK" ) {
+        return bulk_trade_inquire( *p, the_topic.item_type );
+    } else if( topic == "TALK_DELIVER_CONFIRM" ) {
+        return _( "Pleasure doing business!" );
+    } else if( topic == "TALK_TRAIN" ) {
+        if( !g->u.backlog.empty() && g->u.backlog.front().id() == activity_id( "ACT_TRAIN" ) ) {
+            return _( "Shall we resume?" );
+        }
+        std::vector<skill_id> trainable = p->skills_offered_to( g->u );
+        std::vector<matype_id> styles = p->styles_offered_to( g->u );
+        if( trainable.empty() && styles.empty() ) {
+            return _( "Sorry, but it doesn't seem I have anything to teach you." );
+        } else {
+            return _( "Here's what I can teach you..." );
+        }
+    } else if( topic == "TALK_HOW_MUCH_FURTHER" ) {
+        // TODO: this ignores the z-component
+        const tripoint player_pos = p->global_omt_location();
+        int dist = rl_dist( player_pos, p->goal );
+        std::string response;
+        dist *= 100;
+        if( dist >= 1300 ) {
             int miles = dist / 25; // *100, e.g. quarter mile is "25"
             miles -= miles % 25; // Round to nearest quarter-mile
-            int fullmiles = (miles - miles % 100) / 100; // Left of the decimal point
-            if (fullmiles <= 0) {
+            int fullmiles = ( miles - miles % 100 ) / 100; // Left of the decimal point
+            if( fullmiles <= 0 ) {
                 fullmiles = 0;
             }
-            response << string_format(_("%d.%d miles."), fullmiles, miles);
-            } else {
-                response << string_format(ngettext("%d foot.","%d feet.",dist), dist);
-            }
-            return response.str();
-            }
-
-        case TALK_FRIEND:
-            return _("What is it?");
-
-        case TALK_FRIEND_GUARD:
-            return _("I'm on watch.");
-
-        case TALK_DENY_GUARD:
-            return _("Not a bloody chance, I'm going to get left behind!");
-
-        case TALK_DENY_TRAIN:
-            return _("Give it some time, I'll show you something new later...");
-
-        case TALK_DENY_PERSONAL:
-            return _("I'd prefer to keep that to myself.");
-
-        case TALK_FRIEND_UNCOMFORTABLE:
-            return _("I really don't feel comfortable doing so...");
-
-        case TALK_COMBAT_COMMANDS:
-            {
-            std::stringstream status;
-            // Prepending * makes this an action, not a phrase
-            switch (p->combat_rules.engagement) {
-                case ENGAGE_NONE:  status << _("*is not engaging enemies.");         break;
-                case ENGAGE_CLOSE: status << _("*is engaging nearby enemies.");      break;
-                case ENGAGE_WEAK:  status << _("*is engaging weak enemies.");        break;
-                case ENGAGE_HIT:   status << _("*is engaging enemies you attack.");  break;
-                case ENGAGE_ALL:   status << _("*is engaging all enemies.");         break;
-            }
-            std::string npcstr = rm_prefix(p->male ? _("<npc>He") : _("<npc>She"));
-            if (p->combat_rules.use_guns) {
-                if (p->combat_rules.use_silent) {
-                    status << string_format(_(" %s will use silenced firearms."), npcstr.c_str());
-                } else {
-                    status << string_format(_(" %s will use firearms."), npcstr.c_str());
-                }
-            } else {
-                status << string_format(_(" %s will not use firearms."), npcstr.c_str());
-            }
-            if (p->combat_rules.use_grenades) {
-                status << string_format(_(" %s will use grenades."), npcstr.c_str());
-            } else {
-                status << string_format(_(" %s will not use grenades."), npcstr.c_str());
-            }
-
-            return status.str();
-            }
-
-        case TALK_COMBAT_ENGAGEMENT:
-            return _("What should I do?");
-
-        case TALK_STRANGER_NEUTRAL:
-            if (p->myclass == NC_TRADER) {
-                return _("Hello!  Would you care to see my goods?");
-            }
-            return _("Hello there.");
-
-        case TALK_STRANGER_WARY:
-            return _("Okay, no sudden movements...");
-
-        case TALK_STRANGER_SCARED:
-            return _("Keep your distance!");
-
-        case TALK_STRANGER_FRIENDLY:
-            if (p->myclass == NC_TRADER) {
-                return _("Hello!  Would you care to see my goods?");
-            }
-            return _("Hey there, <name_g>.");
-
-        case TALK_STRANGER_AGGRESSIVE:
-            if (!g->u.unarmed_attack()) {
-                return "<drop_it>";
-            } else {
-                return _("This is my territory, <name_b>.");
-            }
-
-        case TALK_MUG:
-        if (!g->u.unarmed_attack()) {
-            return "<drop_it>";
+            response = string_format( _( "%d.%d miles." ), fullmiles, miles );
         } else {
-            return "<hands_up>";
+            response = string_format( ngettext( "%d foot.", "%d feet.", dist ), dist );
         }
-
-        case TALK_DESCRIBE_MISSION:
-            switch (p->mission) {
-                case NPC_MISSION_RESCUE_U:
-                    return _("I'm here to save you!");
-                case NPC_MISSION_SHELTER:
-                    return _("I'm holing up here for safety.");
-                case NPC_MISSION_SHOPKEEP:
-                    return _("I run the shop here.");
-                case NPC_MISSION_MISSING:
-                    return _("Well, I was lost, but you found me...");
-                case NPC_MISSION_KIDNAPPED:
-                    return _("Well, I was kidnapped, but you saved me...");
-                case NPC_MISSION_BASE:
-                    return _("I'm guarding this location.");
-                case NPC_MISSION_NULL:
-                    switch (p->myclass) {
-                        case NC_SHOPKEEP:
-                            return _("I'm a local shopkeeper.");
-                        case NC_HACKER:
-                            return _("I'm looking for some choice systems to hack.");
-                        case NC_DOCTOR:
-                            return _("I'm looking for wounded to help.");
-                        case NC_TRADER:
-                            return _("I'm collecting gear and selling it.");
-                        case NC_NINJA: // TODO: implement this
-                            return _("I'm a wandering master of martial arts but I'm currently not implemented in the code.");
-                        case NC_COWBOY:
-                            return _("Just looking for some wrongs to right.");
-                        case NC_SCIENTIST:
-                            return _("I'm looking for clues concerning these monsters' origins...");
-                        case NC_BOUNTY_HUNTER:
-                            return _("I'm a killer for hire.");
-                        case NC_THUG:
-                            return _("I'm just here for the paycheck.");
-                        case NC_SCAVENGER:
-                            return _("I'm just trying to survive.");
-                        case NC_NONE:
-                            return _("I'm just wandering.");
-                        default:
-                            return "ERROR: Someone forgot to code an npc_class text.";
-                    } // switch (p->myclass)
-                default:
-                    return "ERROR: Someone forgot to code an npc_mission text.";
-            } // switch (p->mission)
-            break;
-
-        case TALK_WEAPON_DROPPED:
-            {
-            std::string npcstr = rm_prefix(p->male ? _("<npc>his") : _("<npc>her"));
-            return string_format(_("*drops %s weapon."), npcstr.c_str());
-            }
-
-        case TALK_DEMAND_LEAVE:
-            return _("Now get out of here, before I kill you.");
-
-        case TALK_SIZE_UP:
-            {
-            int ability = g->u.per_cur * 3 + g->u.int_cur;
-            if (ability <= 10) {
-                return "&You can't make anything out.";
-            }
-
-            if (ability > 100) {
-                ability = 100;
-            }
-
-            std::stringstream info;
-            info << "&";
-            int str_range = int(100 / ability);
-            int str_min = int(p->str_max / str_range) * str_range;
-            info << string_format(_("Str %d - %d"), str_min, str_min + str_range);
-
-            if (ability >= 40) {
-                int dex_range = int(160 / ability);
-                int dex_min = int(p->dex_max / dex_range) * dex_range;
-                info << "  " << string_format(_("Dex %d - %d"), dex_min, dex_min + dex_range);
-            }
-
-            if (ability >= 50) {
-                int int_range = int(200 / ability);
-                int int_min = int(p->int_max / int_range) * int_range;
-                info << "  " << string_format(_("Int %d - %d"), int_min, int_min + int_range);
-            }
-
-            if (ability >= 60) {
-                int per_range = int(240 / ability);
-                int per_min = int(p->per_max / per_range) * per_range;
-                info << "  " << string_format(_("Per %d - %d"), per_min, per_min + per_range);
-            }
-
-            return info.str();
-            }
-            break;
-
-        case TALK_LOOK_AT:
-            {
-            std::stringstream look;
-            look << "&" << p->short_description();
-            return look.str();
-            }
-            break;
-
-        case TALK_OPINION:
-            {
-            std::stringstream opinion;
-            opinion << "&" << p->opinion_text();
-            return opinion.str();
-            }
-            break;
-
-        default:
-            //Suppress warnings
-            break;
-    }
-
-    return "I don't know what to say. (BUG (npctalk.cpp:dynamic_line))";
-}
-
-std::vector<talk_response> gen_responses(talk_topic topic, npc *p)
-{
-    std::vector<talk_response> ret;
-    int selected = p->chatbin.mission_selected;
-    mission *miss = NULL;
-    talk_function effect;
-    if (selected != -1 && selected < (int)p->chatbin.missions_assigned.size()) {
-        miss = g->find_mission( p->chatbin.missions_assigned[selected] );
-    }
-
-    switch (topic) {
-        case TALK_GUARD:
-            RESPONSE(_("Don't mind me..."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_MISSION_LIST:
-            if (p->chatbin.missions.empty()) {
-                RESPONSE(_("Oh, okay."));
-                    SUCCESS(TALK_NONE);
-            } else if (p->chatbin.missions.size() == 1) {
-                SELECT_MISS(_("Tell me about it."), 0);
-                    SUCCESS(TALK_MISSION_OFFER);
-                RESPONSE(_("Never mind, I'm not interested."));
-                    SUCCESS(TALK_NONE);
-            } else {
-                for (size_t i = 0; i < p->chatbin.missions.size(); i++) {
-                    SELECT_MISS(g->find_mission_type( p->chatbin.missions[i] )->name, i);
-                        SUCCESS(TALK_MISSION_OFFER);
-                }
-                RESPONSE(_("Never mind, I'm not interested."));
-                    SUCCESS(TALK_NONE);
-            }
-            break;
-
-        case TALK_MISSION_LIST_ASSIGNED:
-            if (p->chatbin.missions_assigned.empty()) {
-                RESPONSE(_("Never mind then."));
-                    SUCCESS(TALK_NONE);
-            } else if (p->chatbin.missions_assigned.size() == 1) {
-                SELECT_MISS(_("I have news."), 0);
-                    SUCCESS(TALK_MISSION_INQUIRE);
-                RESPONSE(_("Never mind."));
-                    SUCCESS(TALK_NONE);
-            } else {
-                for (size_t i = 0; i < p->chatbin.missions_assigned.size(); i++) {
-                    SELECT_MISS(g->find_mission_type( p->chatbin.missions_assigned[i] )->name, i);
-                        SUCCESS(TALK_MISSION_INQUIRE);
-                }
-                RESPONSE(_("Never mind."));
-                    SUCCESS(TALK_NONE);
-            }
-            break;
-
-        case TALK_MISSION_DESCRIBE:
-            RESPONSE(_("What's the matter?"));
-                SUCCESS(TALK_MISSION_OFFER);
-            RESPONSE(_("I don't care."));
-                SUCCESS(TALK_MISSION_REJECTED);
-            break;
-
-        case TALK_MISSION_OFFER:
-            RESPONSE(_("I'll do it!"));
-                SUCCESS(TALK_MISSION_ACCEPTED);
-                    SUCCESS_ACTION(&talk_function::assign_mission);
-            RESPONSE(_("Not interested."));
-                SUCCESS(TALK_MISSION_REJECTED);
-            break;
-
-        case TALK_MISSION_ACCEPTED:
-            RESPONSE(_("Not a problem."));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Got any advice?"));
-                SUCCESS(TALK_MISSION_ADVICE);
-            RESPONSE(_("Can you share some equipment?"));
-                SUCCESS(TALK_SHARE_EQUIPMENT);
-            RESPONSE(_("I'll be back soon!"));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_MISSION_ADVICE:
-            RESPONSE(_("Sounds good, thanks."));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Sounds good.  Bye!"));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_MISSION_REJECTED:
-            RESPONSE(_("I'm sorry."));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Whatever.  Bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_MISSION_INQUIRE: {
-            int id = p->chatbin.missions_assigned[ p->chatbin.mission_selected ];
-            if (g->mission_failed(id)) {
-                RESPONSE(_("I'm sorry... I failed."));
-                    SUCCESS(TALK_MISSION_FAILURE);
-                        SUCCESS_OPINION(-1, 0, -1, 1, 0);
-                RESPONSE(_("Not yet."));
-                    TRIAL(TALK_TRIAL_LIE, 10 + p->op_of_u.trust * 3);
-                    SUCCESS(TALK_NONE);
-                    FAILURE(TALK_MISSION_FAILURE);
-                        FAILURE_OPINION(-3, 0, -1, 2, 0);
-            } else if (!g->mission_complete(id, p->getID())) {
-                mission_type *type = g->find_mission_type(id);
-                RESPONSE(_("Not yet."));
-                    SUCCESS(TALK_NONE);
-                if (type->goal == MGOAL_KILL_MONSTER) {
-                    RESPONSE(_("Yup, I killed it."));
-                    TRIAL(TALK_TRIAL_LIE, 10 + p->op_of_u.trust * 5);
-                        SUCCESS(TALK_MISSION_SUCCESS);
-                            SUCCESS_ACTION(&talk_function::mission_success);
-                        FAILURE(TALK_MISSION_SUCCESS_LIE);
-                            FAILURE_OPINION(-5, 0, -1, 5, 0);
-                            FAILURE_ACTION(&talk_function::mission_failure);
-                }
-                RESPONSE(_("No.  I'll get back to it, bye!"));
-                    SUCCESS(TALK_DONE);
-            } else {
-                // TODO: Lie about mission
-                mission_type *type = g->find_mission_type(id);
-                switch (type->goal) {
-                    case MGOAL_FIND_ITEM:
-                    case MGOAL_FIND_ANY_ITEM:
-                        RESPONSE(_("Yup!  Here it is!"));
-                            SUCCESS(TALK_MISSION_SUCCESS);
-                                SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                    case MGOAL_GO_TO_TYPE:
-                        RESPONSE(_("We're here!"));
-                            SUCCESS(TALK_MISSION_SUCCESS);
-                                SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                    case MGOAL_GO_TO:
-                    case MGOAL_FIND_NPC:
-                        RESPONSE(_("Here I am."));
-                            SUCCESS(TALK_MISSION_SUCCESS);
-                                SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                    case MGOAL_FIND_MONSTER:
-                        RESPONSE(_("Here it is!"));
-                            SUCCESS(TALK_MISSION_SUCCESS);
-                                SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                    case MGOAL_ASSASSINATE:
-                        RESPONSE(_("Justice has been served."));
-                            SUCCESS(TALK_MISSION_SUCCESS);
-                                SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                    case MGOAL_KILL_MONSTER:
-                        RESPONSE(_("I killed it."));
-                            SUCCESS(TALK_MISSION_SUCCESS);
-                                SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                    case MGOAL_RECRUIT_NPC:
-                    case MGOAL_RECRUIT_NPC_CLASS:
-                        RESPONSE(_("I brought'em."));
-                            SUCCESS(TALK_MISSION_SUCCESS);
-                                SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                    default:
-                        RESPONSE(_("Mission success!  I don't know what else to say."));
-                        SUCCESS(TALK_MISSION_SUCCESS);
-                            SUCCESS_ACTION(&talk_function::mission_success);
-                        break;
-                }
-            }
-        }
-            break;
-
-        case TALK_MISSION_SUCCESS:
-            RESPONSE(_("Glad to help.  I need no payment."));
-                SUCCESS(TALK_NONE);
-                    SUCCESS_OPINION(miss->value / (OWED_VAL * 4), -1,
-                                    miss->value / (OWED_VAL * 2), -1, 0 - miss->value);
-                    SUCCESS_ACTION(&talk_function::clear_mission);
-            RESPONSE(_("How about some items as payment?"));
-                SUCCESS(TALK_MISSION_REWARD);
-                    SUCCESS_ACTION(&talk_function::mission_reward);
-            if((!p->skills_offered_to(&(g->u)).empty() || !p->styles_offered_to(&(g->u)).empty())
-                  && p->myclass != NC_EVAC_SHOPKEEP) {
-                SELECT_TEMP(_("Maybe you can teach me something as payment."), 0);
-                    SUCCESS(TALK_TRAIN);
-                        SUCCESS_ACTION(&talk_function::clear_mission);
-            }
-            RESPONSE(_("I'll take cash if you got it!"));
-                SUCCESS(TALK_MISSION_REWARD);
-                    SUCCESS_ACTION(&talk_function::mission_reward_cash);
-            RESPONSE(_("Glad to help.  I need no payment.  Bye!"));
-                SUCCESS(TALK_DONE);
-                    SUCCESS_ACTION(&talk_function::clear_mission);
-                    SUCCESS_OPINION(p->op_of_u.owed / (OWED_VAL * 4), -1,
-                                    p->op_of_u.owed / (OWED_VAL * 2), -1, 0 - miss->value);
-            break;
-
-        case TALK_MISSION_SUCCESS_LIE:
-            RESPONSE(_("Well, um, sorry."));
-                SUCCESS(TALK_NONE);
-                    SUCCESS_ACTION(&talk_function::clear_mission);
-
-        case TALK_MISSION_FAILURE:
-            RESPONSE(_("I'm sorry.  I did what I could."));
-                SUCCESS(TALK_NONE);
-            break;
-
-        case TALK_MISSION_REWARD:
-            RESPONSE(_("Thank you."));
-                SUCCESS(TALK_NONE);
-                    SUCCESS_ACTION(&talk_function::clear_mission);
-            RESPONSE(_("Thanks, bye."));
-                SUCCESS(TALK_DONE);
-                    SUCCESS_ACTION(&talk_function::clear_mission);
-            break;
-
-        case TALK_EVAC_MERCHANT:
-            RESPONSE(_("I'm actually new..."));
-                SUCCESS(TALK_EVAC_MERCHANT_NEW);
-            RESPONSE(_("What are you doing here?"));
-                SUCCESS(TALK_EVAC_MERCHANT_PLANS);
-            RESPONSE(_("Heard anything about the outside world?"));
-                SUCCESS(TALK_EVAC_MERCHANT_WORLD);
-            RESPONSE(_("Is there any way I can join your group?"));
-                SUCCESS(TALK_EVAC_MERCHANT_ASK_JOIN);
-            RESPONSE(_("Can I do anything for the center?"));
-                SUCCESS(TALK_MISSION_LIST);
-            if (p->chatbin.missions_assigned.size() == 1) {
-                RESPONSE(_("About that job..."));
-                    SUCCESS(TALK_MISSION_INQUIRE);
-            } else if (p->chatbin.missions_assigned.size() >= 2) {
-                RESPONSE(_("About one of those jobs..."));
-                    SUCCESS(TALK_MISSION_LIST_ASSIGNED);
-            }
-            RESPONSE(_("Let's trade then."));
-                SUCCESS_ACTION(&talk_function::start_trade);
-                SUCCESS(TALK_EVAC_MERCHANT);
-            RESPONSE(_("Well, bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_MERCHANT_NEW:
-            RESPONSE(_("No rest for the weary..."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-        case TALK_EVAC_MERCHANT_PLANS:
-            RESPONSE(_("It's just as bad out here, if not worse."));
-                SUCCESS(TALK_EVAC_MERCHANT_PLANS2);
-            break;
-        case TALK_EVAC_MERCHANT_PLANS2:
-            if (g->u.int_cur >= 12){
-                RESPONSE(_("[INT 12] Wait, six buses and refugees... how many people do you still have crammed in here?"));
-                    SUCCESS(TALK_EVAC_MERCHANT_PLANS3);
-            }
-            RESPONSE(_("Guess shit's a mess everywhere..."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-        case TALK_EVAC_MERCHANT_PLANS3:
-            RESPONSE(_("Guess it works for you..."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-        case TALK_EVAC_MERCHANT_HORDES:
-            RESPONSE(_("Thanks for the tip."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-        case TALK_EVAC_MERCHANT_PRIME_LOOT:
-            RESPONSE(_("Thanks, I'll keep an eye out."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-        case TALK_EVAC_MERCHANT_NO:
-            RESPONSE(_("Fine..."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-        case TALK_EVAC_MERCHANT_HELL_NO:
-            RESPONSE(_("Fine... *coughupyourscough*"));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-
-        case TALK_EVAC_MERCHANT_ASK_JOIN:
-            if (g->u.int_cur > 10){
-                RESPONSE(_("[INT 11] I'm sure I can organize salvage operations to increase the bounty scavengers bring in!"));
-                    SUCCESS(TALK_EVAC_MERCHANT_NO);
-            }
-            if (g->u.int_cur <= 6 && g->u.str_cur > 10){
-                RESPONSE(_("[STR 11] I punch things in face real good!"));
-                    SUCCESS(TALK_EVAC_MERCHANT_NO);
-            }
-            RESPONSE(_("I'm sure I can do something to change your mind *wink*"));
-                SUCCESS(TALK_EVAC_MERCHANT_HELL_NO);
-            RESPONSE(_("I can pull my own weight!"));
-                SUCCESS(TALK_EVAC_MERCHANT_NO);
-            RESPONSE(_("I guess I'll look somewhere else..."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-
-        case TALK_EVAC_MERCHANT_WORLD:
-            RESPONSE(_("Hordes?"));
-                SUCCESS(TALK_EVAC_MERCHANT_HORDES);
-            RESPONSE(_("Heard of anything better than the odd gun cache?"));
-                SUCCESS(TALK_EVAC_MERCHANT_PRIME_LOOT);
-            RESPONSE(_("Was hoping for something more..."));
-                SUCCESS(TALK_EVAC_MERCHANT);
-            break;
-
-        case TALK_EVAC_GUARD1:
-            RESPONSE(_("What is this place?"));
-                SUCCESS(TALK_EVAC_GUARD1_PLACE);
-            RESPONSE(_("Can I join you guys?"));
-                SUCCESS(TALK_EVAC_GUARD1_JOIN);
-            RESPONSE(_("Anything I can do for you?"));
-                SUCCESS(TALK_EVAC_GUARD1_JOB);
-            RESPONSE(_("See you later."));
-                SUCCESS(TALK_EVAC_GUARD1_BYE);
-            break;
-
-        case TALK_EVAC_GUARD1_PLACE:
-            RESPONSE(_("So are you with the government or something?"));
-                SUCCESS(TALK_EVAC_GUARD1_GOVERNMENT);
-            RESPONSE(_("What do you trade?"));
-                SUCCESS(TALK_EVAC_GUARD1_TRADE);
-            break;
-
-        case TALK_EVAC_GUARD1_GOVERNMENT:
-            RESPONSE(_("Oh, okay."));
-                SUCCESS(TALK_EVAC_GUARD1);
-            RESPONSE(_("Oh, okay. I'll go look for him"));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD1_TRADE:
-            RESPONSE(_("I'll go talk to them later."));
-                SUCCESS(TALK_EVAC_GUARD1);
-            RESPONSE(_("Will do, thanks!"));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD1_JOIN:
-            RESPONSE(_("That's pretty blunt!"));
-                SUCCESS(TALK_EVAC_GUARD1_JOIN2);
-            break;
-
-        case TALK_EVAC_GUARD1_JOIN2:
-            RESPONSE(_("So no negotiating? No, 'If you do this quest then we'll let you in?'"));
-                SUCCESS(TALK_EVAC_GUARD1_JOIN3);
-            break;
-
-        case TALK_EVAC_GUARD1_JOIN3:
-            RESPONSE(_("I don't like your attitude."));
-                SUCCESS(TALK_EVAC_GUARD1_ATTITUDE);
-            RESPONSE(_("Well alright then."));
-                SUCCESS(TALK_EVAC_GUARD1);
-            break;
-
-        case TALK_EVAC_GUARD1_ATTITUDE:
-            RESPONSE(_("I think I'd rather rearrange your face instead!"));
-                SUCCESS_ACTION(&talk_function::insult_combat);
-                SUCCESS(TALK_DONE);
-            RESPONSE(_("I will."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD1_JOB:
-            RESPONSE(_("Alright then."));
-                SUCCESS(TALK_EVAC_GUARD1);
-            RESPONSE(_("Old Guard huh, I'll go talk to him!"));
-                SUCCESS(TALK_DONE);
-            RESPONSE(_("Who are the Old Guard?"));
-                SUCCESS(TALK_EVAC_GUARD1_OLDGUARD);
-            break;
-
-        case TALK_EVAC_GUARD1_OLDGUARD:
-            RESPONSE(_("Whatever, I had another question."));
-                SUCCESS(TALK_EVAC_GUARD1);
-            RESPONSE(_("Okay, I'll go look for him then."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD1_BYE:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD2:
-            RESPONSE(_("I am actually new."));
-                SUCCESS(TALK_EVAC_GUARD2_NEW);
-            RESPONSE(_("Are there any rules I should follow while inside?"));
-                SUCCESS(TALK_EVAC_GUARD2_RULES);
-            RESPONSE(_("So who is everyone around here?"));
-                SUCCESS(TALK_EVAC_GUARD2_WHO);
-            RESPONSE(_("Lets trade!"));
-                SUCCESS(TALK_EVAC_GUARD2_TRADE);
-            RESPONSE(_("Is there anything I can do to help?"));
-                SUCCESS(TALK_MISSION_LIST);
-            if (p->chatbin.missions_assigned.size() == 1) {
-                RESPONSE(_("About that job..."));
-                    SUCCESS(TALK_MISSION_INQUIRE);
-            } else if (p->chatbin.missions_assigned.size() >= 2) {
-                RESPONSE(_("About one of those jobs..."));
-                    SUCCESS(TALK_MISSION_LIST_ASSIGNED);
-            }
-            RESPONSE(_("Thanks! I will be on my way."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case  TALK_EVAC_GUARD2_NEW:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_EVAC_GUARD2);
-            break;
-
-        case TALK_EVAC_GUARD2_RULES:
-            RESPONSE(_("Ok, thanks."));
-                SUCCESS(TALK_EVAC_GUARD2);
-            RESPONSE(_("So uhhh, why not?"));
-                SUCCESS(TALK_EVAC_GUARD2_RULES_BASEMENT);
-            break;
-
-        case  TALK_EVAC_GUARD2_RULES_BASEMENT:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_EVAC_GUARD2);
-            break;
-
-        case TALK_EVAC_GUARD2_WHO:
-            RESPONSE(_("Thanks for the heads-up."));
-                SUCCESS(TALK_EVAC_GUARD2);
-            break;
-
-        case TALK_EVAC_GUARD2_TRADE:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_EVAC_GUARD2);
-            break;
-
-        case TALK_EVAC_GUARD3:
-            RESPONSE(_("What do you do around here?"));
-                SUCCESS(TALK_EVAC_GUARD3_NEW);
-            RESPONSE(_("Got tips for avoiding trouble?"));
-                SUCCESS(TALK_EVAC_GUARD3_RULES);
-            RESPONSE(_("Have you seen anyone who might be hiding something?"));
-                SUCCESS(TALK_EVAC_GUARD3_HIDE1);
-            RESPONSE(_("Bye..."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD3_NEW:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_EVAC_GUARD3);
-            break;
-
-        case TALK_EVAC_GUARD3_RULES:
-            RESPONSE(_("OK..."));
-                SUCCESS(TALK_EVAC_GUARD3);
-            break;
-
-        case TALK_EVAC_GUARD3_WASTE:
-            RESPONSE(_("Sorry..."));
-                SUCCESS(TALK_EVAC_GUARD3);
-            break;
-
-        case TALK_EVAC_GUARD3_HIDE1:
-            RESPONSE(_("I'm not sure..."));
-                SUCCESS(TALK_EVAC_GUARD3_WASTE);
-            RESPONSE(_("Like they could be working for someone else?"));
-                SUCCESS(TALK_EVAC_GUARD3_HIDE2);
-            break;
-
-        case TALK_EVAC_GUARD3_HIDE2:
-            RESPONSE(_("Sorry, I didn't mean to offend you..."));
-                SUCCESS(TALK_EVAC_GUARD3_WASTE);
-            RESPONSE(_("Get bent, traitor!"));
-                TRIAL(TALK_TRIAL_INTIMIDATE, 20 + p->op_of_u.fear * 3);
-                    SUCCESS(TALK_EVAC_GUARD3_HOSTILE);
-                    FAILURE(TALK_EVAC_GUARD3_INSULT);
-            RESPONSE(_("Got something to hide?"));
-                TRIAL(TALK_TRIAL_PERSUADE, 10 + p->op_of_u.trust * 3);
-                    SUCCESS(TALK_EVAC_GUARD3_DEAD);
-                    FAILURE(TALK_EVAC_GUARD3_INSULT);
-            break;
-
-        case TALK_EVAC_GUARD3_HOSTILE:
-            p->my_fac->likes_u -= 15;//The Free Merchants are insulted by your actions!
-            p->my_fac->respects_u -= 15;
-            p->my_fac = g->faction_by_ident("hells_raiders");
-            RESPONSE(_("I didn't mean it!"));
-                SUCCESS(TALK_DONE);
-            RESPONSE(_("..."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD3_INSULT:
-            p->my_fac->likes_u -= 5;//The Free Merchants are insulted by your actions!
-            p->my_fac->respects_u -= 5;
-            RESPONSE(_("..."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_GUARD3_DEAD:
-            p->my_fac = g->faction_by_ident("hells_raiders");
-            RESPONSE(_("I didn't mean it!"));
-                SUCCESS(TALK_DONE);
-            RESPONSE(_("..."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_EVAC_HUNTER:
-            RESPONSE(_("You... smelled me?"));
-                SUCCESS(TALK_EVAC_HUNTER_SMELL);
-            RESPONSE(_("What do you do around here?"));
-                SUCCESS(TALK_EVAC_HUNTER_DO);
-            RESPONSE(_("Got anything for sale?"));
-                SUCCESS(TALK_EVAC_HUNTER_SALE);
-            RESPONSE(_("Got any survival advice?"));
-                SUCCESS(TALK_EVAC_HUNTER_ADVICE);
-            RESPONSE(_("Goodbye."));
-                SUCCESS(TALK_EVAC_HUNTER_BYE);
-            break;
-
-        case TALK_EVAC_HUNTER_SMELL:
-            RESPONSE(_("O..kay..? "));
-                SUCCESS(TALK_EVAC_HUNTER);
-            break;
-
-        case TALK_EVAC_HUNTER_DO:
-            RESPONSE(_("Interesting."));
-                SUCCESS(TALK_EVAC_HUNTER_LIFE);
-            RESPONSE(_("Oh, so you hunt?"));
-                SUCCESS(TALK_EVAC_HUNTER_HUNT);
-            break;
-
-        case TALK_EVAC_HUNTER_LIFE:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_EVAC_HUNTER);
-            break;
-
-        case TALK_EVAC_HUNTER_HUNT:
-            RESPONSE(_("Great, now my mouth is watering..."));
-                SUCCESS(TALK_EVAC_HUNTER);
-            break;
-
-        case TALK_EVAC_HUNTER_SALE:
-            RESPONSE(_("..."));
-                SUCCESS_ACTION(&talk_function::start_trade);
-                SUCCESS(TALK_EVAC_HUNTER);
-            break;
-
-        case TALK_EVAC_HUNTER_ADVICE:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_EVAC_HUNTER);
-            break;
-
-        case TALK_EVAC_HUNTER_BYE:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_OLD_GUARD_REP:
-            RESPONSE(_("Who are you?"));
-                SUCCESS(TALK_OLD_GUARD_REP_NEW);
-            RESPONSE(_("Heard anything about the outside world?"));
-                SUCCESS(TALK_OLD_GUARD_REP_WORLD);
-            RESPONSE(_("Is there any way I can join the 'Old Guard'?"));
-                SUCCESS( TALK_OLD_GUARD_REP_ASK_JOIN);
-            RESPONSE(_("Does the Old Guard need anything?"));
-                SUCCESS(TALK_MISSION_LIST);
-            if (p->chatbin.missions_assigned.size() == 1) {
-                RESPONSE(_("About that job..."));
-                    SUCCESS(TALK_MISSION_INQUIRE);
-            } else if (p->chatbin.missions_assigned.size() >= 2) {
-                RESPONSE(_("About one of those jobs..."));
-                    SUCCESS(TALK_MISSION_LIST_ASSIGNED);
-            }
-            RESPONSE(_("Well, bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_OLD_GUARD_REP_NEW:
-            RESPONSE(_("So what are you actually doing here?"));
-                SUCCESS(TALK_OLD_GUARD_REP_NEW_DOING);
-            RESPONSE(_("Nevermind..."));
-                SUCCESS(TALK_OLD_GUARD_REP);
-            break;
-
-        case TALK_OLD_GUARD_REP_NEW_DOING:
-            RESPONSE(_("Is there a catch?"));
-                SUCCESS(TALK_OLD_GUARD_REP_NEW_DOWNSIDE);
-            RESPONSE(_("Anything more to it?"));
-                SUCCESS(TALK_OLD_GUARD_REP_NEW_DOWNSIDE);
-            RESPONSE(_("Nevermind..."));
-                SUCCESS(TALK_OLD_GUARD_REP);
-            break;
-        case TALK_OLD_GUARD_REP_NEW_DOWNSIDE:
-            RESPONSE(_("Hmmm..."));
-                SUCCESS(TALK_OLD_GUARD_REP);
-            break;
-
-        case TALK_OLD_GUARD_REP_WORLD:
-            RESPONSE(_("The 2nd Fleet?"));
-                SUCCESS(TALK_OLD_GUARD_REP_WORLD_2NDFLEET);
-            RESPONSE(_("Tell me about the footholds."));
-                SUCCESS(TALK_OLD_GUARD_REP_WORLD_FOOTHOLDS);
-            RESPONSE(_("Nevermind..."));
-                SUCCESS(TALK_OLD_GUARD_REP);
-            break;
-
-        case TALK_OLD_GUARD_REP_WORLD_2NDFLEET:
-            RESPONSE(_("Hmmm..."));
-                SUCCESS(TALK_OLD_GUARD_REP);
-            break;
-        case TALK_OLD_GUARD_REP_WORLD_FOOTHOLDS:
-            RESPONSE(_("Hmmm..."));
-                SUCCESS(TALK_OLD_GUARD_REP);
-            break;
-        case TALK_OLD_GUARD_REP_ASK_JOIN:
-            RESPONSE(_("Hmmm..."));
-                SUCCESS(TALK_OLD_GUARD_REP);
-            break;
-
-        case TALK_ARSONIST:
-            RESPONSE(_("I'm actually new."));
-                SUCCESS(TALK_ARSONIST_NEW);
-            RESPONSE(_("What are you doing here?"));
-                SUCCESS(TALK_ARSONIST_DOING);
-            RESPONSE(_("Heard anything about the outside world?"));
-                SUCCESS(TALK_ARSONIST_WORLD);
-            RESPONSE(_("Is there any way I can join your group?"));
-                SUCCESS(TALK_ARSONIST_JOIN);
-            RESPONSE(_("What's with your ears?"));
-                SUCCESS(TALK_ARSONIST_MUTATION);
-            RESPONSE(_("Anything I can help with?"));
-                SUCCESS(TALK_MISSION_LIST);
-            if (p->chatbin.missions_assigned.size() == 1) {
-                RESPONSE(_("About that job..."));
-                    SUCCESS(TALK_MISSION_INQUIRE);
-            } else if (p->chatbin.missions_assigned.size() >= 2) {
-                RESPONSE(_("About one of those jobs..."));
-                    SUCCESS(TALK_MISSION_LIST_ASSIGNED);
-            }
-            RESPONSE(_("Well, bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_ARSONIST_NEW:
-            RESPONSE(_("Sucks..."));
-                SUCCESS(TALK_ARSONIST);
-            break;
-        case TALK_ARSONIST_DOING:
-            RESPONSE(_("I'll buy."));
-                SUCCESS_ACTION(&talk_function::start_trade);
-                SUCCESS(TALK_ARSONIST);
-            RESPONSE(_("Who needs rebar?"));
-                SUCCESS(TALK_ARSONIST_DOING_REBAR);
-            break;
-        case TALK_ARSONIST_DOING_REBAR:
-            RESPONSE(_("Well, then..."));
-                SUCCESS(TALK_ARSONIST);
-            break;
-        case TALK_ARSONIST_WORLD:
-            RESPONSE(_("Nothing optimistic?"));
-                SUCCESS(TALK_ARSONIST_WORLD_OPTIMISTIC);
-            RESPONSE(_("..."));
-                SUCCESS(TALK_ARSONIST);
-            break;
-        case TALK_ARSONIST_WORLD_OPTIMISTIC:
-            RESPONSE(_("I feel bad for asking."));
-                SUCCESS(TALK_ARSONIST);
-            break;
-        case TALK_ARSONIST_JOIN:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_ARSONIST);
-            break;
-        case TALK_ARSONIST_MUTATION:
-            RESPONSE(_("Sorry to ask"));
-                SUCCESS(TALK_ARSONIST);
-            RESPONSE(_("You're disgusting."));
-                SUCCESS(TALK_ARSONIST_MUTATION_INSULT);
-            break;
-        case TALK_ARSONIST_MUTATION_INSULT:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_DONE);
-                    SUCCESS_OPINION(-1, -2, -1, 1, 0);
-                    SUCCESS_ACTION(&talk_function::end_conversation);
-            break;
-
-        case TALK_SCAVENGER_MERC:
-            RESPONSE(_("Who are you?"));
-                SUCCESS(TALK_SCAVENGER_MERC_NEW);
-            RESPONSE(_("Any tips for surviving?"));
-                SUCCESS(TALK_SCAVENGER_MERC_TIPS);
-            RESPONSE(_("What would it cost to hire you?"));
-                SUCCESS(TALK_SCAVENGER_MERC_HIRE);
-            RESPONSE(_("Well, bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_SCAVENGER_MERC_NEW:
-            RESPONSE(_("..."));
-                SUCCESS(TALK_SCAVENGER_MERC);
-            break;
-        case TALK_SCAVENGER_MERC_TIPS:
-            RESPONSE(_("I suppose I should hire a party then?"));
-                SUCCESS(TALK_SCAVENGER_MERC);
-            break;
-        case TALK_SCAVENGER_MERC_HIRE:
-            if (g->u.cash >= 800000){
-                RESPONSE(_("[$8000] You have a deal."));
-                g->u.cash -= 800000;
-                    SUCCESS(TALK_SCAVENGER_MERC_HIRE_SUCCESS);
-            }
-            RESPONSE(_("I might be back."));
-                SUCCESS(TALK_SCAVENGER_MERC);
-            break;
-
-        case TALK_SCAVENGER_MERC_HIRE_SUCCESS:
-            RESPONSE(_("Glad to have you aboard."));
-                SUCCESS_ACTION(&talk_function::follow);
-                SUCCESS_OPINION(1, 0, 1, 0, 0);
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_FREE_MERCHANT_STOCKS:
-            RESPONSE(_("Who are you?"));
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_NEW);
-            if (g->u.charges_of("jerky") > 0){
-                RESPONSE(_("Delivering jerky."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_JERKY);
-            }
-            if (g->u.charges_of("meat_smoked") > 0){
-                RESPONSE(_("Delivering smoked meat."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_SMMEAT);
-            }
-            if (g->u.charges_of("fish_smoked") > 0){
-                RESPONSE(_("Delivering smoked fish."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_SMFISH);
-            }
-            if (g->u.charges_of("cooking_oil") > 0){
-                RESPONSE(_("Delivering cooking oil."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_OIL);
-            }
-            if (g->u.charges_of("cornmeal") > 0){
-                RESPONSE(_("Delivering cornmeal."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_CORNMEAL);
-            }
-            if (g->u.charges_of("flour") > 0){
-                RESPONSE(_("Delivering flour."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_FLOUR);
-            }
-            if (g->u.charges_of("fruit_wine") > 0){
-                RESPONSE(_("Delivering fruit wine."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_WINE);
-            }
-            if (g->u.charges_of("hb_beer") > 0){
-                RESPONSE(_("Delivering homebrew beer."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_BEER);
-            }
-            if (g->u.charges_of("sugar") > 0){
-                RESPONSE(_("Delivering sugar."));
-                    SUCCESS(TALK_FREE_MERCHANT_STOCKS_SUGAR);
-            }
-            RESPONSE(_("Well, bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_FREE_MERCHANT_STOCKS_JERKY:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "jerky");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_SMMEAT:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "meat_smoked");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_SMFISH:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "fish_smoked");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_OIL:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "cooking_oil");
-            SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_CORNMEAL:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "cornmeal");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_FLOUR:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "flour");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_SUGAR:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "sugar");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_WINE:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "fruit_wine");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_BEER:
-            RESPONSE(_("Works for me."));
-                effect.bulk_trade_accept(p, "hb_beer");
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_DELIVERED);
-            break;
-
-        case TALK_FREE_MERCHANT_STOCKS_NEW:
-            RESPONSE(_("Why cornmeal, jerky, and fruit wine?"));
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_WHY);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_WHY:
-            RESPONSE(_("Are you looking to buy anything else?"));
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS_ALL);
-            RESPONSE(_("Very well..."));
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_ALL:
-            RESPONSE(_("Interesting..."));
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS);
-            break;
-        case TALK_FREE_MERCHANT_STOCKS_DELIVERED:
-            RESPONSE(_("You might be seeing more of me..."));
-                SUCCESS(TALK_FREE_MERCHANT_STOCKS);
-            break;
-
-        case TALK_SHELTER:
-            RESPONSE(_("What should we do now?"));
-                SUCCESS(TALK_SHELTER_PLANS);
-            RESPONSE(_("Can I do anything for you?"));
-                SUCCESS(TALK_MISSION_LIST);
-            if (!p->is_following()) {
-                RESPONSE(_("Want to travel with me?"));
-                    SUCCESS(TALK_SUGGEST_FOLLOW);
-            }
-            if (p->chatbin.missions_assigned.size() == 1) {
-                RESPONSE(_("About that job..."));
-                    SUCCESS(TALK_MISSION_INQUIRE);
-            } else if (p->chatbin.missions_assigned.size() >= 2) {
-                RESPONSE(_("About one of those jobs..."));
-                    SUCCESS(TALK_MISSION_LIST_ASSIGNED);
-            }
-            RESPONSE(_("I can't leave the shelter without equipment..."));
-                SUCCESS(TALK_SHARE_EQUIPMENT);
-            RESPONSE(_("Well, bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_SHELTER_PLANS:
-            // TODO: Add _("follow me")
-            RESPONSE(_("Hmm, okay.  Bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_SHARE_EQUIPMENT:
-            if (p->has_disease(_("asked_for_item"))) {
-                RESPONSE(_("Okay, fine."));
-                    SUCCESS(TALK_NONE);
-            } else {
-                int score = p->op_of_u.trust + p->op_of_u.value * 3 +
-                              p->personality.altruism * 2;
-                int missions_value = p->assigned_missions_value();
-                if (g->u.has_amount(_("mininuke"), 1)) {
-                    RESPONSE(_("Because I'm holding a thermal detonator!"));
-                        SUCCESS(TALK_GIVE_EQUIPMENT);
-                            SUCCESS_ACTION(&talk_function::give_equipment);
-                            SUCCESS_OPINION(0, 0, -1, 0, score * 300);
-                        FAILURE(TALK_DENY_EQUIPMENT);
-                            FAILURE_OPINION(0, 0, -1, 0, 0);
-                }
-                RESPONSE(_("Because I'm your friend!"));
-                    TRIAL(TALK_TRIAL_PERSUADE, 10 + score);
-                        SUCCESS(TALK_GIVE_EQUIPMENT);
-                            SUCCESS_ACTION(&talk_function::give_equipment);
-                            SUCCESS_OPINION(0, 0, -1, 0, score * 300);
-                        FAILURE(TALK_DENY_EQUIPMENT);
-                            FAILURE_OPINION(0, 0, -1, 0, 0);
-                if (missions_value >= 1) {
-                    RESPONSE(_("Well, I am helping you out..."));
-                        TRIAL(TALK_TRIAL_PERSUADE, 12 + (.8 * score) + missions_value / OWED_VAL);
-                            SUCCESS(TALK_GIVE_EQUIPMENT);
-                                SUCCESS_ACTION(&talk_function::give_equipment);
-                            FAILURE(TALK_DENY_EQUIPMENT);
-                                FAILURE_OPINION(0, 0, -1, 0, 0);
-                }
-                RESPONSE(_("I'll give it back!"));
-                    TRIAL(TALK_TRIAL_LIE, score * 1.5);
-                        SUCCESS(TALK_GIVE_EQUIPMENT);
-                            SUCCESS_ACTION(&talk_function::give_equipment);
-                            SUCCESS_OPINION(0, 0, -1, 0, score * 300);
-                        FAILURE(TALK_DENY_EQUIPMENT);
-                            FAILURE_OPINION(0, -1, -1, 1, 0);
-                RESPONSE(_("Give it to me, or else!"));
-                    TRIAL(TALK_TRIAL_INTIMIDATE, 40);
-                        SUCCESS(TALK_GIVE_EQUIPMENT);
-                            SUCCESS_ACTION(&talk_function::give_equipment);
-                            SUCCESS_OPINION(-3, 2, -2, 2,
-                                            (g->u.intimidation() + p->op_of_u.fear -
-                                            p->personality.bravery - p->intimidation()) * 500);
-                        FAILURE(TALK_DENY_EQUIPMENT);
-                            FAILURE_OPINION(-3, 1, -3, 5, 0);
-                RESPONSE(_("Eh, never mind."));
-                    SUCCESS(TALK_NONE);
-                RESPONSE(_("Never mind, I'll do without.  Bye."));
-                    SUCCESS(TALK_DONE);
-            }
-            break;
-
-        case TALK_GIVE_EQUIPMENT:
-            RESPONSE(_("Thank you!"));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Thanks!  But can I have some more?"));
-                SUCCESS(TALK_SHARE_EQUIPMENT);
-            RESPONSE(_("Thanks, see you later!"));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_DENY_EQUIPMENT:
-            RESPONSE(_("Okay, okay, sorry."));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Seriously, give me more stuff!"));
-                SUCCESS(TALK_SHARE_EQUIPMENT);
-            RESPONSE(_("Okay, fine, bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_TRAIN: {
-            if( !g->u.backlog.empty() && g->u.backlog.front().type == ACT_TRAIN ) {
-                player_activity &backlog = g->u.backlog.front();
-                std::stringstream resume;
-                resume << _("Yes, let's resume training ");
-                Skill *skillt = Skill::skill(backlog.name);
-                if(skillt == NULL) {
-                    resume << martialarts[backlog.name].name;
-                    SELECT_STYLE(resume.str(), backlog.name);
-                } else {
-                    resume << skillt->name();
-                    SELECT_SKIL(resume.str(), skillt);
-                }
-                SUCCESS(TALK_TRAIN_START);
-            }
-            std::vector<matype_id> styles = p->styles_offered_to( &(g->u) );
-            std::vector<Skill*> trainable = p->skills_offered_to( &(g->u) );
-            if (trainable.empty() && styles.empty()) {
-                RESPONSE(_("Oh, okay.")); // Nothing to learn here
-                    SUCCESS(TALK_NONE);
-                break;
-            }
-            int printed = 0;
-            int shift = p->chatbin.tempvalue;
-            bool more = trainable.size() + styles.size() - shift > 9;
-            for (size_t i = shift; i < trainable.size() && printed < 9; i++) {
-                //shift--;
-                printed++;
-                Skill* trained = trainable[i];
-                SELECT_SKIL(string_format(_("%s: %d -> %d (cost %d)"), trained->name().c_str(),
-                      static_cast<int>(g->u.skillLevel(trained)), g->u.skillLevel(trained) + 1,
-                      200 * (g->u.skillLevel(trained) + 1)),
-                      trainable[i]);
-                    SUCCESS(TALK_TRAIN_START);
-            }
-            if (shift < 0) {
-                shift = 0;
-            }
-            for (size_t i = 0; i < styles.size() && printed < 9; i++) {
-                printed++;
-                SELECT_STYLE( string_format(_("%s (cost 800)"), martialarts[styles[i]].name.c_str()),
-                      styles[i] );
-                    SUCCESS(TALK_TRAIN_START);
-            }
-            if (more) {
-                SELECT_TEMP(_("More..."), shift + 9);
-                    SUCCESS(TALK_TRAIN);
-            }
-            if (shift > 0) {
-                int newshift = shift - 9;
-                if (newshift < 0) {
-                    newshift = 0;
-                }
-                SELECT_TEMP(_("Back..."), newshift);
-                    SUCCESS(TALK_TRAIN);
-            }
-            RESPONSE(_("Eh, never mind."));
-                SUCCESS(TALK_NONE);
-        }
-            break;
-
-        case TALK_TRAIN_START:
-            if (g->cur_om->is_safe(g->om_location().x, g->om_location().y, g->levz)) {
-                RESPONSE(_("Sounds good."));
-                    SUCCESS(TALK_DONE);
-                        SUCCESS_ACTION(&talk_function::start_training);
-                RESPONSE(_("On second thought, never mind."));
-                    SUCCESS(TALK_NONE);
-            } else {
-                RESPONSE(_("Okay.  Lead the way."));
-                    SUCCESS(TALK_DONE);
-                        SUCCESS_ACTION(&talk_function::lead_to_safety);
-                RESPONSE(_("No, we'll be okay here."));
-                    SUCCESS(TALK_TRAIN_FORCE);
-                RESPONSE(_("On second thought, never mind."));
-                    SUCCESS(TALK_NONE);
-            }
-            break;
-
-        case TALK_TRAIN_FORCE:
-            RESPONSE(_("Sounds good."));
-                SUCCESS(TALK_DONE);
-                    SUCCESS_ACTION(&talk_function::start_training);
-            RESPONSE(_("On second thought, never mind."));
-                SUCCESS(TALK_NONE);
-            break;
-
-        case TALK_SUGGEST_FOLLOW:
-            if (p->has_disease(_("infection"))) {
-                RESPONSE(_("Understood.  I'll get those antibiotics."));
-                    SUCCESS(TALK_NONE);
-            } else if (p->has_disease(_("asked_to_follow"))) {
-                RESPONSE(_("Right, right, I'll ask later."));
-                    SUCCESS(TALK_NONE);
-            } else {
-                int strength = 3 * p->op_of_u.fear + p->op_of_u.value + p->op_of_u.trust +
-                                (10 - p->personality.bravery);
-                int weakness = 3 * p->personality.altruism + p->personality.bravery -
-                                p->op_of_u.fear + p->op_of_u.value;
-                int friends = 2 * p->op_of_u.trust + 2 * p->op_of_u.value -
-                                2 * p->op_of_u.anger + p->op_of_u.owed / 50;
-                RESPONSE(_("I can keep you safe."));
-                    TRIAL(TALK_TRIAL_PERSUADE, strength * 2);
-                        SUCCESS(TALK_AGREE_FOLLOW);
-                            SUCCESS_ACTION(&talk_function::follow);
-                            SUCCESS_OPINION(1, 0, 1, 0, 0);
-                        FAILURE(TALK_DENY_FOLLOW);
-                            FAILURE_ACTION(&talk_function::deny_follow);
-                            FAILURE_OPINION(0, 0, -1, 1, 0);
-                RESPONSE(_("You can keep me safe."));
-                    TRIAL(TALK_TRIAL_PERSUADE, weakness * 2);
-                        SUCCESS(TALK_AGREE_FOLLOW);
-                            SUCCESS_ACTION(&talk_function::follow);
-                            SUCCESS_OPINION(0, 0, -1, 0, 0);
-                        FAILURE(TALK_DENY_FOLLOW);
-                            FAILURE_ACTION(&talk_function::deny_follow);
-                            FAILURE_OPINION(0, -1, -1, 1, 0);
-                RESPONSE(_("We're friends, aren't we?"));
-                    TRIAL(TALK_TRIAL_PERSUADE, friends * 1.5);
-                        SUCCESS(TALK_AGREE_FOLLOW);
-                            SUCCESS_ACTION(&talk_function::follow);
-                            SUCCESS_OPINION(2, 0, 0, -1, 0);
-                        FAILURE(TALK_DENY_FOLLOW);
-                            FAILURE_ACTION(&talk_function::deny_follow);
-                            FAILURE_OPINION(-1, -2, -1, 1, 0);
-                RESPONSE(_("!I'll kill you if you don't."));
-                    TRIAL(TALK_TRIAL_INTIMIDATE, strength * 2);
-                        SUCCESS(TALK_AGREE_FOLLOW);
-                            SUCCESS_ACTION(&talk_function::follow);
-                            SUCCESS_OPINION(-4, 3, -1, 4, 0);
-                        FAILURE(TALK_DENY_FOLLOW);
-                            FAILURE_OPINION(-4, 0, -5, 10, 0);
-            }
-            break;
-
-        case TALK_AGREE_FOLLOW:
-            RESPONSE(_("Awesome!"));
-                SUCCESS(TALK_FRIEND);
-            RESPONSE(_("Okay, let's go!"));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_DENY_FOLLOW:
-            RESPONSE(_("Oh, okay."));
-                SUCCESS(TALK_NONE);
-            break;
-
-        case TALK_LEADER: {
-            int persuade = p->op_of_u.fear + p->op_of_u.value + p->op_of_u.trust -
-                            p->personality.bravery - p->personality.aggression;
-            if (p->has_destination()) {
-                RESPONSE(_("How much further?"));
-                    SUCCESS(TALK_HOW_MUCH_FURTHER);
-            }
-                RESPONSE(_("I'm going to go my own way for a while."));
-                    SUCCESS(TALK_LEAVE);
-            if (!p->has_disease(_("asked_to_lead"))) {
-                RESPONSE(_("I'd like to lead for a while."));
-                    TRIAL(TALK_TRIAL_PERSUADE, persuade);
-                        SUCCESS(TALK_PLAYER_LEADS);
-                            SUCCESS_ACTION(&talk_function::follow);
-                        FAILURE(TALK_LEADER_STAYS);
-                            FAILURE_OPINION(0, 0, -1, -1, 0);
-                RESPONSE(_("Step aside.  I'm leader now."));
-                    TRIAL(TALK_TRIAL_INTIMIDATE, 40);
-                        SUCCESS(TALK_PLAYER_LEADS);
-                            SUCCESS_ACTION(&talk_function::follow);
-                            SUCCESS_OPINION(-1, 1, -1, 1, 0);
-                        FAILURE(TALK_LEADER_STAYS);
-                            FAILURE_OPINION(-1, 0, -1, 1, 0);
-            }
-            RESPONSE(_("Can I do anything for you?"));
-                SUCCESS(TALK_MISSION_LIST);
-            RESPONSE(_("Let's trade items."));
-                SUCCESS(TALK_NONE);
-                SUCCESS_ACTION(&talk_function::start_trade);
-            RESPONSE(_("Let's go."));
-                SUCCESS(TALK_DONE);
-        }
-            break;
-
-        case TALK_LEAVE:
-            RESPONSE(_("Nah, I'm just kidding."));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Yeah, I'm sure.  Bye."));
-                SUCCESS_ACTION(&talk_function::leave);
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_PLAYER_LEADS:
-            RESPONSE(_("Good.  Something else..."));
-                SUCCESS(TALK_FRIEND);
-            RESPONSE(_("Alright, let's go."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_LEADER_STAYS:
-            RESPONSE(_("Okay, okay."));
-                SUCCESS(TALK_NONE);
-            break;
-
-        case TALK_HOW_MUCH_FURTHER:
-            RESPONSE(_("Okay, thanks."));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Let's keep moving."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_FRIEND_GUARD:
-            RESPONSE(_("I need you to come with me."));
-                SUCCESS(TALK_FRIEND);
-                    SUCCESS_ACTION(&talk_function::stop_guard);
-            RESPONSE(_("See you around."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_FRIEND:
-            RESPONSE(_("Combat commands..."));
-                SUCCESS(TALK_COMBAT_COMMANDS);
-            RESPONSE(_("Can I do anything for you?"));
-                SUCCESS(TALK_MISSION_LIST);
-            SELECT_TEMP(_("Can you teach me anything?"), 0);
-            if (!p->has_disease("asked_to_train")) {
-                int commitment = 2 * p->op_of_u.trust + 1 * p->op_of_u.value -
-                                  3 * p->op_of_u.anger + p->op_of_u.owed / 50;
-                TRIAL(TALK_TRIAL_PERSUADE, commitment * 2);
-                    SUCCESS(TALK_TRAIN);
-                    FAILURE(TALK_DENY_PERSONAL);
-                        FAILURE_ACTION(&talk_function::deny_train);
-            } else {
-                SUCCESS(TALK_DENY_TRAIN);
-            }
-            RESPONSE(_("Let's trade items."));
-                SUCCESS(TALK_NONE);
-                SUCCESS_ACTION(&talk_function::start_trade);
-            if (p->is_following() && g->m.camp_at(g->u.posx, g->u.posy)) {
-                RESPONSE(_("Wait at this base."));
-                    SUCCESS(TALK_DONE);
-                        SUCCESS_ACTION(&talk_function::assign_base);
-            }
-            if (p->is_following()) {
-                RESPONSE(_("Guard this position."));
-                int loyalty = 3 * p->op_of_u.trust + 1 * p->op_of_u.value -
-                              1 * p->op_of_u.anger + p->op_of_u.owed / 50;
-                    TRIAL(TALK_TRIAL_PERSUADE, loyalty * 2);
-                        SUCCESS(TALK_FRIEND_GUARD);
-                            SUCCESS_ACTION(&talk_function::assign_guard);
-                        FAILURE(TALK_DENY_GUARD);
-                            FAILURE_OPINION(-1, -2, -1, 1, 0);
-            }
-            if (p->is_following()) {
-                RESPONSE(_("I'd like to know a bit more about you..."));
-                if (!p->has_disease("asked_personal_info")) {
-                    int loyalty = 3 * p->op_of_u.trust + 1 * p->op_of_u.value -
-                                    3 * p->op_of_u.anger + p->op_of_u.owed / 25;
-                    TRIAL(TALK_TRIAL_PERSUADE, loyalty * 2);
-                        SUCCESS(TALK_FRIEND);
-                            SUCCESS_ACTION(&talk_function::reveal_stats);
-                        FAILURE(TALK_DENY_PERSONAL);
-                            FAILURE_ACTION(&talk_function::deny_personal_info);
-                } else {
-                    SUCCESS (TALK_FRIEND_UNCOMFORTABLE);
-                }
-            }
-            RESPONSE(_("I'm going to go my own way for a while."));
-                SUCCESS(TALK_LEAVE);
-            RESPONSE(_("Let's go."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_FRIEND_UNCOMFORTABLE:
-            RESPONSE(_("I'll give you some space."));
-                SUCCESS(TALK_FRIEND);
-            break;
-
-        case TALK_DENY_TRAIN:
-            RESPONSE(_("Very well..."));
-                SUCCESS(TALK_FRIEND);
-            break;
-
-        case TALK_DENY_PERSONAL:
-            RESPONSE(_("I understand..."));
-                SUCCESS(TALK_FRIEND);
-            break;
-
-        case TALK_COMBAT_COMMANDS: {
-            RESPONSE(_("Change your engagement rules..."));
-                SUCCESS(TALK_COMBAT_ENGAGEMENT);
-            if (p->combat_rules.use_guns) {
-                RESPONSE(_("Don't use guns anymore."));
-                    SUCCESS(TALK_COMBAT_COMMANDS);
-                        SUCCESS_ACTION(&talk_function::toggle_use_guns);
-            } else {
-                RESPONSE(_("You can use guns."));
-                    SUCCESS(TALK_COMBAT_COMMANDS);
-                        SUCCESS_ACTION(&talk_function::toggle_use_guns);
-            }
-            if (p->combat_rules.use_silent) {
-                RESPONSE(_("Don't worry about noise."));
-                    SUCCESS(TALK_COMBAT_COMMANDS);
-                        SUCCESS_ACTION(&talk_function::toggle_use_silent);
-            } else {
-                RESPONSE(_("Use only silent weapons."));
-                    SUCCESS(TALK_COMBAT_COMMANDS);
-                        SUCCESS_ACTION(&talk_function::toggle_use_silent);
-            }
-            if (p->combat_rules.use_grenades) {
-                RESPONSE(_("Don't use grenades anymore."));
-                    SUCCESS(TALK_COMBAT_COMMANDS);
-                        SUCCESS_ACTION(&talk_function::toggle_use_grenades);
-            } else {
-                RESPONSE(_("You can use grenades."));
-                    SUCCESS(TALK_COMBAT_COMMANDS);
-                        SUCCESS_ACTION(&talk_function::toggle_use_grenades);
-            }
-            RESPONSE(_("Never mind."));
-                SUCCESS(TALK_NONE);
-        }
-            break;
-
-        case TALK_COMBAT_ENGAGEMENT: {
-            if (p->combat_rules.engagement != ENGAGE_NONE) {
-                RESPONSE(_("Don't fight unless your life depends on it."));
-                    SUCCESS(TALK_NONE);
-                        SUCCESS_ACTION(&talk_function::set_engagement_none);
-            }
-            if (p->combat_rules.engagement != ENGAGE_CLOSE) {
-                RESPONSE(_("Attack enemies that get too close."));
-                    SUCCESS(TALK_NONE);
-                        SUCCESS_ACTION(&talk_function::set_engagement_close);
-            }
-            if (p->combat_rules.engagement != ENGAGE_WEAK) {
-                RESPONSE(_("Attack enemies that you can kill easily."));
-                    SUCCESS(TALK_NONE);
-                        SUCCESS_ACTION(&talk_function::set_engagement_weak);
-            }
-            if (p->combat_rules.engagement != ENGAGE_HIT) {
-                RESPONSE(_("Attack only enemies that I attack first."));
-                    SUCCESS(TALK_NONE);
-                        SUCCESS_ACTION(&talk_function::set_engagement_hit);
-            }
-            if (p->combat_rules.engagement != ENGAGE_ALL) {
-                RESPONSE(_("Attack anything you want."));
-                    SUCCESS(TALK_NONE);
-                        SUCCESS_ACTION(&talk_function::set_engagement_all);
-            }
-            RESPONSE(_("Never mind."));
-                SUCCESS(TALK_NONE);
-        }
-            break;
-
-        case TALK_STRANGER_NEUTRAL:
-        case TALK_STRANGER_WARY:
-        case TALK_STRANGER_SCARED:
-        case TALK_STRANGER_FRIENDLY:
-            if (topic == TALK_STRANGER_NEUTRAL || topic == TALK_STRANGER_FRIENDLY) {
-                RESPONSE(_("Another survivor!  We should travel together."));
-                    SUCCESS(TALK_SUGGEST_FOLLOW);
-                RESPONSE(_("What are you doing?"));
-                    SUCCESS(TALK_DESCRIBE_MISSION);
-                RESPONSE(_("Care to trade?"));
-                    SUCCESS(TALK_DONE);
-                        SUCCESS_ACTION(&talk_function::start_trade);
-                RESPONSE(_("Bye."));
-                    SUCCESS(TALK_DONE);
-            } else {
-                if (!g->u.unarmed_attack()) {
-                    if (g->u.volume_carried() + g->u.weapon.volume() <= g->u.volume_capacity()){
-                        RESPONSE(_("&Put away weapon."));
-                            SUCCESS(TALK_STRANGER_NEUTRAL);
-                                SUCCESS_ACTION(&talk_function::player_weapon_away);
-                                SUCCESS_OPINION(2, -2, 0, 0, 0);
-                                SUCCESS_ACTION(&talk_function::stranger_neutral);
-                    }
-                    RESPONSE(_("&Drop weapon."));
-                        SUCCESS(TALK_STRANGER_NEUTRAL);
-                            SUCCESS_ACTION(&talk_function::player_weapon_drop);
-                            SUCCESS_OPINION(4, -3, 0, 0, 0);
-                }
-                int diff = 50 + p->personality.bravery - 2 * p->op_of_u.fear + 2 * p->op_of_u.trust;
-                RESPONSE(_("Don't worry, I'm not going to hurt you."));
-                    TRIAL(TALK_TRIAL_PERSUADE, diff);
-                        SUCCESS(TALK_STRANGER_NEUTRAL);
-                            SUCCESS_OPINION(1, -1, 0, 0, 0);
-                            SUCCESS_ACTION(&talk_function::stranger_neutral);
-                        FAILURE(TALK_DONE);
-                            FAILURE_ACTION(&talk_function::flee);
-            }
-            if (!p->unarmed_attack()) {
-                RESPONSE(_("!Drop your weapon!"));
-                    TRIAL(TALK_TRIAL_INTIMIDATE, 30);
-                        SUCCESS(TALK_WEAPON_DROPPED);
-                            SUCCESS_ACTION(&talk_function::drop_weapon);
-                        FAILURE(TALK_DONE);
-                            FAILURE_ACTION(&talk_function::hostile);
-            }
-            RESPONSE(_("!Get out of here or I'll kill you."));
-                TRIAL(TALK_TRIAL_INTIMIDATE, 20);
-                    SUCCESS(TALK_DONE);
-                        SUCCESS_ACTION(&talk_function::flee);
-                    FAILURE(TALK_DONE);
-                        FAILURE_ACTION(&talk_function::hostile);
-            break;
-
-        case TALK_STRANGER_AGGRESSIVE:
-        case TALK_MUG:
-            if (!g->u.unarmed_attack()) {
-               int chance = 30 + p->personality.bravery - 3 * p->personality.aggression +
-                             2 * p->personality.altruism - 2 * p->op_of_u.fear +
-                             3 * p->op_of_u.trust;
-                RESPONSE(_("!Calm down.  I'm not going to hurt you."));
-                    TRIAL(TALK_TRIAL_PERSUADE, chance);
-                        SUCCESS(TALK_STRANGER_WARY);
-                            SUCCESS_OPINION(1, -1, 0, 0, 0);
-                            SUCCESS_ACTION(&talk_function::stranger_neutral);
-                        FAILURE(TALK_DONE);
-                            FAILURE_ACTION(&talk_function::hostile);
-                RESPONSE(_("!Screw you, no."));
-                    TRIAL(TALK_TRIAL_INTIMIDATE, chance - 5);
-                        SUCCESS(TALK_STRANGER_SCARED);
-                            SUCCESS_OPINION(-2, 1, 0, 1, 0);
-                        FAILURE(TALK_DONE);
-                            FAILURE_ACTION(&talk_function::hostile);
-                RESPONSE(_("&Drop weapon."));
-                    if (topic == TALK_MUG) {
-                        SUCCESS(TALK_MUG);
-                    } else {
-                        SUCCESS(TALK_DEMAND_LEAVE);
-                    }
-                    SUCCESS_ACTION(&talk_function::player_weapon_drop);
-            } else if (topic == TALK_MUG) {
-                int chance = 35 + p->personality.bravery - 3 * p->personality.aggression +
-                                 2 * p->personality.altruism - 2 * p->op_of_u.fear +
-                                 3 * p->op_of_u.trust;
-                RESPONSE(_("!Calm down.  I'm not going to hurt you."));
-                    TRIAL(TALK_TRIAL_PERSUADE, chance);
-                        SUCCESS(TALK_STRANGER_WARY);
-                            SUCCESS_OPINION(1, -1, 0, 0, 0);
-                            SUCCESS_ACTION(&talk_function::stranger_neutral);
-                        FAILURE(TALK_DONE);
-                            FAILURE_ACTION(&talk_function::hostile);
-                RESPONSE(_("!Screw you, no."));
-                    TRIAL(TALK_TRIAL_INTIMIDATE, chance - 5);
-                        SUCCESS(TALK_STRANGER_SCARED);
-                            SUCCESS_OPINION(-2, 1, 0, 1, 0);
-                        FAILURE(TALK_DONE);
-                            FAILURE_ACTION(&talk_function::hostile);
-                RESPONSE(_("&Put hands up."));
-                    SUCCESS(TALK_DONE);
-                        SUCCESS_ACTION(&talk_function::start_mugging);
-            }
-            break;
-
-        case TALK_DESCRIBE_MISSION:
-            RESPONSE(_("I see."));
-                SUCCESS(TALK_NONE);
-            RESPONSE(_("Bye."));
-                SUCCESS(TALK_DONE);
-            break;
-
-        case TALK_WEAPON_DROPPED:
-            RESPONSE(_("Now get out of here."));
-                SUCCESS(TALK_DONE);
-                    SUCCESS_OPINION(-1, -2, 0, -2, 0);
-                    SUCCESS_ACTION(&talk_function::flee);
-            break;
-
-        case TALK_DEMAND_LEAVE:
-            RESPONSE(_("Okay, I'm going."));
-                SUCCESS(TALK_DONE);
-                    SUCCESS_OPINION(0, -1, 0, 0, 0);
-                    SUCCESS_ACTION(&talk_function::player_leaving);
-            break;
-
-        case TALK_SIZE_UP:
-        case TALK_LOOK_AT:
-        case TALK_OPINION:
-            RESPONSE(_("Okay."));
-                SUCCESS(TALK_NONE);
-            break;
-
-        default:
-            //Suppress warnings
-            break;
-    }
-
-    if (ret.empty()) {
-        RESPONSE(_("Bye."));
-            SUCCESS(TALK_DONE);
-    }
-
-    return ret;
-}
-
-int trial_chance(talk_response response, player *u, npc *p)
-{
- talk_trial trial = response.trial;
- int chance = response.difficulty;
- switch (trial) {
-  case TALK_TRIAL_NONE:
-  case NUM_TALK_TRIALS:
-   dbg( D_ERROR ) << "called trial_chance with invalid talk_trial value: " << trial;
-   break;
-  case TALK_TRIAL_LIE:
-   chance += u->talk_skill() - p->talk_skill() + p->op_of_u.trust * 3;
-   if (u->has_trait("TRUTHTELLER")) {
-      chance -= 40;
-   }
-   if (u->has_trait("TAIL_FLUFFY")) {
-      chance -= 20;
-   }
-   else if (u->has_trait("LIAR")) {
-      chance += 40;
-   }
-   if (u->has_trait("ELFAEYES")) {
-      chance += 10;
-   }
-   if ((u->has_trait("WINGS_BUTTERFLY")) || (u->has_trait("FLOWERS"))) {
-      chance += 10;
-   }
-   if (u->has_bionic("bio_voice")) { //come on, who would suspect a robot of lying?
-      chance += 10;
-   }
-   if (u->has_bionic("bio_face_mask")) {
-   chance += 20;
-   }
-   break;
-
-  case TALK_TRIAL_PERSUADE:
-   chance += u->talk_skill() - int(p->talk_skill() / 2) +
-           p->op_of_u.trust * 2 + p->op_of_u.value;
-   if (u->has_trait("ELFAEYES")) {
-      chance += 20;
-   }
-   if (u->has_trait("TAIL_FLUFFY")) {
-      chance += 10;
-   }
-   if (u->has_trait("WINGS_BUTTERFLY")) {
-      chance += 15; // Flutter your wings at 'em
-   }
-   if (u->has_bionic("bio_face_mask")) {
-      chance += 10;
-   }
-   if (u->has_trait("GROWL")) {
-      chance -= 25;
-   }
-   if (u->has_trait("HISS")) {
-      chance -= 25;
-   }
-   if (u->has_trait("SNARL")) {
-      chance -= 60;
-   }
-   if (u->has_bionic("bio_deformity")) {
-      chance -= 50;
-   }
-   if (u->has_bionic("bio_voice")) {
-      chance -= 20;
-   }
-   break;
-
-  case TALK_TRIAL_INTIMIDATE:
-   chance += u->intimidation() - p->intimidation() + p->op_of_u.fear * 2 -
-           p->personality.bravery * 2;
-   if (u->has_trait("MINOTAUR")) {
-      chance += 15;
-   }
-   if (u->has_trait("MUZZLE")) {
-      chance += 6;
-   }
-   if (u->has_trait("MUZZLE_LONG")) {
-      chance += 20;
-   }
-   if (u->has_trait("SABER_TEETH")) {
-      chance += 15;
-   }
-   if (u->has_trait("TERRIFYING")) {
-      chance += 15;
-   }
-   if (u->has_trait("ELFAEYES")) {
-      chance += 10;
-   }
- //if (p->has_trait("TERRIFYING")) // This appears to do nothing, since NPCs don't seem to actually check for it.
- // chance -= 15;
-   if (u->has_trait("GROWL")) {
-      chance += 15;
-   }
-   if (u->has_trait("HISS")) {
-      chance += 15;
-   }
-   if (u->has_trait("SNARL")) {
-      chance += 30;
-   }
-   if (u->has_trait("WINGS_BUTTERFLY")) {
-      chance -= 20; // Butterflies are not terribly threatening.  :-(
-   }
-   if (u->has_bionic("bio_face_mask")) {
-      chance += 10;
-   }
-   if (u->has_bionic("bio_armor_eyes")) {
-      chance += 10;
-   }
-   if (u->has_bionic("bio_deformity")) {
-      chance += 20;
-   }
-   if (u->has_bionic("bio_voice")) {
-      chance += 20;
-   }
-   break;
-
- }
-
- if (chance < 0)
-  return 0;
- if (chance > 100)
-  return 100;
-
- return chance;
-}
-
-int topic_category(talk_topic topic)
-{
- switch (topic) {
-  case TALK_MISSION_START:
-  case TALK_MISSION_DESCRIBE:
-  case TALK_MISSION_OFFER:
-  case TALK_MISSION_ACCEPTED:
-  case TALK_MISSION_REJECTED:
-  case TALK_MISSION_ADVICE:
-  case TALK_MISSION_INQUIRE:
-  case TALK_MISSION_SUCCESS:
-  case TALK_MISSION_SUCCESS_LIE:
-  case TALK_MISSION_FAILURE:
-  case TALK_MISSION_REWARD:
-  case TALK_MISSION_END:
-   return 1;
-
-  case TALK_SHARE_EQUIPMENT:
-  case TALK_GIVE_EQUIPMENT:
-  case TALK_DENY_EQUIPMENT:
-   return 2;
-
-  case TALK_SUGGEST_FOLLOW:
-  case TALK_AGREE_FOLLOW:
-  case TALK_DENY_FOLLOW:
-   return 3;
-
-  case TALK_COMBAT_ENGAGEMENT:
-   return 4;
-
-  case TALK_COMBAT_COMMANDS:
-   return 5;
-
-  case TALK_TRAIN:
-  case TALK_TRAIN_START:
-  case TALK_TRAIN_FORCE:
-   return 6;
-
-  case TALK_SIZE_UP:
-  case TALK_LOOK_AT:
-  case TALK_OPINION:
-   return 99;
-
-  default:
-   return -1; // Not grouped with other topics
- }
- return -1;
-}
-
-void talk_function::assign_mission(npc *p)
-{
-    int selected = p->chatbin.mission_selected;
-    if (selected == -1 || selected >= (int)p->chatbin.missions.size()) {
-        debugmsg("mission_selected = %d; missions.size() = %d!",
-                    selected, p->chatbin.missions.size());
-        return;
-    }
-    mission *miss = g->find_mission( p->chatbin.missions[selected] );
-    g->assign_mission(p->chatbin.missions[selected]);
-    miss->npc_id = p->getID();
-    g->u.active_mission = g->u.active_missions.size() - 1;
-    p->chatbin.missions_assigned.push_back( p->chatbin.missions[selected] );
-    p->chatbin.missions.erase(p->chatbin.missions.begin() + selected);
-}
-
-void talk_function::mission_success(npc *p)
-{
-    int selected = p->chatbin.mission_selected;
-    if (selected == -1 || selected >= (int)p->chatbin.missions_assigned.size()) {
-        debugmsg("mission_selected = %d; missions_assigned.size() = %d!",
-                    selected, p->chatbin.missions_assigned.size());
-        return;
-    }
-    int index = p->chatbin.missions_assigned[selected];
-    mission *miss = g->find_mission(index);
-    npc_opinion tmp( 0, 0, 1 + (miss->value / 1000), -1, miss->value);
-    p->op_of_u += tmp;
-    if (p->my_fac != NULL){
-        p->my_fac->likes_u += 10;
-        p->my_fac->respects_u += 10;
-    }
-    g->wrap_up_mission(index);
-}
-
-void talk_function::mission_failure(npc *p)
-{
-    int selected = p->chatbin.mission_selected;
-    if (selected == -1 || selected >= (int)p->chatbin.missions_assigned.size()) {
-        debugmsg("mission_selected = %d; missions_assigned.size() = %d!",
-                    selected, p->chatbin.missions_assigned.size());
-        return;
-    }
-    npc_opinion tmp( -1, 0, -1, 1, 0);
-    p->op_of_u += tmp;
-    g->mission_failed(p->chatbin.missions_assigned[selected]);
-}
-
-void talk_function::clear_mission(npc *p)
-{
-    int selected = p->chatbin.mission_selected;
-    p->chatbin.mission_selected = -1;
-    if (selected == -1 || selected >= (int)p->chatbin.missions_assigned.size()) {
-        debugmsg("mission_selected = %d; missions_assigned.size() = %d!",
-                    selected, p->chatbin.missions_assigned.size());
-        return;
-    }
-    mission *miss = g->find_mission( p->chatbin.missions_assigned[selected] );
-    p->chatbin.missions_assigned.erase( p->chatbin.missions_assigned.begin() +
-                                        selected);
-    if (miss->follow_up != MISSION_NULL) {
-        p->chatbin.missions.push_back( g->reserve_mission(miss->follow_up, p->getID()) );
-    }
-}
-
-void talk_function::mission_reward(npc *p)
-{
- int trade_amount = p->op_of_u.owed;
- p->op_of_u.owed = 0;
- trade(p, trade_amount, _("Reward"));
-}
-
-void talk_function::mission_reward_cash(npc *p)
-{
- int trade_amount = p->op_of_u.owed * .6;
- p->op_of_u.owed = 0;
- g->u.cash += trade_amount;
-}
-
-void talk_function::start_trade(npc *p)
-{
- int trade_amount = p->op_of_u.owed;
- p->op_of_u.owed = 0;
- trade(p, trade_amount, _("Trade"));
-}
-
-std::string talk_function::bulk_trade_inquire(npc *p, itype_id it)
-{
- int you_have = g->u.charges_of(it);
- item tmp(it, 0);
- int item_cost = tmp.price();
- tmp.charges = you_have;
- int total_cost = tmp.price();
- p->add_msg_if_player(m_good, _("Let's see what you've got..."));
- std::stringstream response;
- response << string_format(ngettext("I'm willing to pay $%.2f per serving. You have "
-                                    "%d serving for a total of $%.2f. No questions asked, here is your cash.",
-                                    "I'm willing to pay $%.2f per serving. You have "
-                                    "%d servings for a total of $%.2f. No questions asked, here is your cash.",
-                            you_have)
-                            ,(double)item_cost/100 ,you_have, (double)total_cost/100);
- return response.str();
-}
-
-void talk_function::bulk_trade_accept(npc *p, itype_id it)
-{
- int you_have = g->u.charges_of(it);
- item tmp(it, 0);
- tmp.charges = you_have;
- int total = tmp.price();
- g->u.use_charges(it, you_have);
- g->u.cash += total;
- p->add_msg_if_player(m_good, _("Pleasure doing business!"));
-}
-
-void talk_function::assign_base(npc *p)
-{
-    // TODO: decide what to do upon assign? maybe pathing required
-    basecamp* camp = g->m.camp_at(g->u.posx, g->u.posy);
-    if(!camp) {
-        dbg(D_ERROR) << "talk_function::assign_base: Assigned to base but no base here.";
-        return;
-    }
-
-    add_msg(_("%s waits at %s"), p->name.c_str(), camp->camp_name().c_str());
-    p->mission = NPC_MISSION_BASE;
-    p->attitude = NPCATT_NULL;
-}
-
-void talk_function::assign_guard(npc *p)
-{
-    add_msg(_("%s is posted as a guard."), p->name.c_str());
-    p->attitude = NPCATT_NULL;
-    p->mission = NPC_MISSION_GUARD;
-    p->chatbin.first_topic = TALK_FRIEND_GUARD;
-    p->set_destination();
-}
-
-void talk_function::stop_guard(npc *p)
-{
-    p->attitude = NPCATT_FOLLOW;
-    add_msg(_("%s begins to follow you."), p->name.c_str());
-    p->mission = NPC_MISSION_NULL;
-    p->chatbin.first_topic = TALK_FRIEND;
-    p->goal = p->no_goal_point;
-    p->guardx = -1;
-    p->guardy = -1;
-}
-
-void talk_function::reveal_stats (npc *p)
-{
-    p->disp_info();
-}
-
-void talk_function::end_conversation(npc *p)
-{
-    add_msg(_("%s starts ignoring you."), p->name.c_str());
-    p->chatbin.first_topic = TALK_DONE;
-}
-
-void talk_function::insult_combat(npc *p)
-{
-    add_msg(_("You start a fight with %s!"), p->name.c_str());
-    p->chatbin.first_topic = TALK_DONE;
-    p->attitude =  NPCATT_KILL;
-}
-
-void talk_function::give_equipment(npc *p)
-{
-    std::vector<item*> giving;
-    std::vector<int> prices;
-    p->init_selling(giving, prices);
-    int chosen = -1;
-    if (giving.empty()) {
-        invslice slice = p->inv.slice();
-        for (auto &i : slice) {
-            giving.push_back(&i->front());
-            prices.push_back(i->front().price());
-        }
-    }
-    while (chosen == -1 && giving.size() > 1) {
-        int index = rng(0, giving.size() - 1);
-        if (prices[index] < p->op_of_u.owed) {
-            chosen = index;
-        }
-        giving.erase(giving.begin() + index);
-        prices.erase(prices.begin() + index);
-    }
-    if (giving.empty()) {
-        popup(_("%s has nothing to give!"), p->name.c_str());
-        return;
-    }
-    if (chosen == -1) {
-        chosen = 0;
-    }
-    item it = p->i_rem(giving[chosen]);
-    popup(_("%s gives you a %s"), p->name.c_str(), it.tname().c_str());
-
-    g->u.i_add( it );
-    p->op_of_u.owed -= prices[chosen];
-    p->add_disease("asked_for_item", 1800);
-}
-
-void talk_function::follow(npc *p)
-{
-    p->attitude = NPCATT_FOLLOW;
-}
-
-void talk_function::deny_follow(npc *p)
-{
-    p->add_disease("asked_to_follow", 3600);
-}
-
-void talk_function::deny_lead(npc *p)
-{
- p->add_disease("asked_to_lead", 3600);
-}
-
-void talk_function::deny_equipment(npc *p)
-{
- p->add_disease("asked_for_item", 600);
-}
-
-void talk_function::deny_train(npc *p)
-{
- p->add_disease("asked_to_train", 3600);
-}
-
-void talk_function::deny_personal_info(npc *p)
-{
- p->add_disease("asked_personal_info", 1800);
-}
-
-void talk_function::hostile(npc *p)
-{
- add_msg(_("%s turns hostile!"), p->name.c_str());
-    g->u.add_memorial_log(pgettext("memorial_male","%s became hostile."),
-        pgettext("memorial_female", "%s became hostile."),
-        p->name.c_str());
- p->attitude = NPCATT_KILL;
-}
-
-void talk_function::flee(npc *p)
-{
- add_msg(_("%s turns to flee!"), p->name.c_str());
- p->attitude = NPCATT_FLEE;
-}
-
-void talk_function::leave(npc *p)
-{
- add_msg(_("%s leaves."), p->name.c_str());
- p->attitude = NPCATT_NULL;
-}
-
-void talk_function::stranger_neutral(npc *p)
-{
- add_msg(_("%s feels less threatened by you."), p->name.c_str());
- p->attitude = NPCATT_NULL;
- p->chatbin.first_topic = TALK_STRANGER_NEUTRAL;
-}
-
-void talk_function::start_mugging(npc *p)
-{
- p->attitude = NPCATT_MUG;
- add_msg(_("Pause to stay still.  Any movement may cause %s to attack."),
-            p->name.c_str());
-}
-
-void talk_function::player_leaving(npc *p)
-{
- p->attitude = NPCATT_WAIT_FOR_LEAVE;
- p->patience = 15 - p->personality.aggression;
-}
-
-void talk_function::drop_weapon(npc *p)
-{
- g->m.add_item_or_charges(p->posx, p->posy, p->remove_weapon());
-}
-
-void talk_function::player_weapon_away(npc *p)
-{
-    (void)p; //unused
-    g->u.i_add(g->u.remove_weapon());
-}
-
-void talk_function::player_weapon_drop(npc *p)
-{
-    (void)p; // unused
-    g->m.add_item_or_charges(g->u.posx, g->u.posy, g->u.remove_weapon());
-}
-
-void talk_function::lead_to_safety(npc *p)
-{
- g->give_mission(MISSION_REACH_SAFETY);
- int missid = g->u.active_missions[g->u.active_mission];
- point target = g->find_mission( missid )->target;
- // TODO: the target has no z-component
- p->goal.x = target.x;
- p->goal.y = target.y;
- p->goal.z = g->levz;
- p->attitude = NPCATT_LEAD;
-}
-
-void talk_function::toggle_use_guns(npc *p)
-{
- p->combat_rules.use_guns = !p->combat_rules.use_guns;
-}
-
-void talk_function::toggle_use_silent(npc *p)
-{
- p->combat_rules.use_silent = !p->combat_rules.use_silent;
-}
-
-void talk_function::toggle_use_grenades(npc *p)
-{
- p->combat_rules.use_grenades = !p->combat_rules.use_grenades;
-}
-
-void talk_function::set_engagement_none(npc *p)
-{
- p->combat_rules.engagement = ENGAGE_NONE;
-}
-
-void talk_function::set_engagement_close(npc *p)
-{
- p->combat_rules.engagement = ENGAGE_CLOSE;
-}
-
-void talk_function::set_engagement_weak(npc *p)
-{
- p->combat_rules.engagement = ENGAGE_WEAK;
-}
-
-void talk_function::set_engagement_hit(npc *p)
-{
- p->combat_rules.engagement = ENGAGE_HIT;
-}
-
-void talk_function::set_engagement_all(npc *p)
-{
- p->combat_rules.engagement = ENGAGE_ALL;
-}
-
-//TODO currently this does not handle martial art styles correctly
-void talk_function::start_training(npc *p)
-{
- int cost = 0, time = 0;
- Skill* sk_used = NULL;
- std::string name;
- if (p->chatbin.skill == NULL) {
-  // we're training a martial art style
-  cost = -800;
-  time = 30000;
-  name = p->chatbin.style;
- } else {
-   sk_used = p->chatbin.skill;
-   cost = -200 * (1 + g->u.skillLevel(sk_used));
-   time = 10000 + 5000 * g->u.skillLevel(sk_used);
-   name = p->chatbin.skill->ident();
- }
-
-// Pay for it
- if (p->op_of_u.owed >= 0 - cost)
-  p->op_of_u.owed += cost;
- else if (!trade(p, cost, _("Pay for training:")))
-  return;
-// Then receive it
- g->u.assign_activity(ACT_TRAIN, time, p->chatbin.tempvalue, 0, name);
- p->add_disease("asked_to_train", 3600);
-}
-
-void parse_tags(std::string &phrase, const player *u, const npc *me)
-{
- if (u == NULL || me == NULL) {
-  debugmsg("Called parse_tags() with NULL pointers!");
-  return;
- }
- size_t fa, fb;
- std::string tag;
- do {
-  fa = phrase.find("<");
-  fb = phrase.find(">");
-  int l = fb - fa + 1;
-  if (fa != std::string::npos && fb != std::string::npos)
-   tag = phrase.substr(fa, fb - fa + 1);
-  else
-   tag = "";
-  bool replaced = false;
-  for (int i = 0; i < NUM_STATIC_TAGS && !replaced; i++) {
-   if (tag == talk_tags[i].tag) {
-    phrase.replace(fa, l, (*talk_tags[i].replacement)[rng(0, 9)]);
-    replaced = true;
-   }
-  }
-  if (!replaced) { // Special, dynamic tags go here
-   if (tag == "<yrwp>")
-    phrase.replace(fa, l, u->weapon.tname());
-   else if (tag == "<mywp>") {
-    if (me->weapon.type->id == "null")
-     phrase.replace(fa, l, _("fists"));
-    else
-     phrase.replace(fa, l, me->weapon.tname());
-   } else if (tag == "<ammo>") {
-    if (!me->weapon.is_gun())
-     phrase.replace(fa, l, _("BADAMMO"));
-    else {
-     it_gun* gun = dynamic_cast<it_gun*>(me->weapon.type);
-     phrase.replace(fa, l, ammo_name(gun->ammo));
-    }
-   } else if (tag == "<punc>") {
-    switch (rng(0, 2)) {
-     case 0: phrase.replace(fa, l, rm_prefix(_("<punc>.")));   break;
-     case 1: phrase.replace(fa, l, rm_prefix(_("<punc>..."))); break;
-     case 2: phrase.replace(fa, l, rm_prefix(_("<punc>!")));   break;
-    }
-   } else if (tag != "") {
-    debugmsg("Bad tag. '%s' (%d - %d)", tag.c_str(), fa, fb);
-    phrase.replace(fa, fb - fa + 1, "????");
-   }
-  }
- } while (fa != std::string::npos && fb != std::string::npos);
-}
-
-talk_topic dialogue::opt(talk_topic topic)
-{
- const char* talk_trial_text[NUM_TALK_TRIALS] = {
-  "", _("LIE"), _("PERSUADE"), _("INTIMIDATE")
- };
- std::string challenge = dynamic_line(topic, beta);
- std::vector<talk_response> responses = gen_responses(topic, beta);
-// Put quotes around challenge (unless it's an action)
- if (challenge[0] != '*' && challenge[0] != '&') {
-  std::stringstream tmp;
-  tmp << "\"" << challenge << "\"";
- }
-// Parse any tags in challenge
- parse_tags(challenge, alpha, beta);
- capitalize_letter(challenge);
-// Prepend "My Name: "
- if (challenge[0] == '&') // No name prepended!
-  challenge = challenge.substr(1);
- else if (challenge[0] == '*')
-  challenge = rmp_format(_("<npc does something>%s %s"), beta->name.c_str(),
-     challenge.substr(1).c_str());
- else
-  challenge = rmp_format(_("<npc says something>%s: %s"), beta->name.c_str(),
-     challenge.c_str());
- history.push_back(""); // Empty line between lines of dialogue
-
-// Number of lines to highlight
- int hilight_lines = 1;
- std::vector<std::string> folded = foldstring(challenge, FULL_SCREEN_WIDTH / 2);
- for (size_t i = 0; i < folded.size(); i++) {
-  history.push_back(folded[i]);
-  hilight_lines++;
- }
-
- std::vector<std::string> options;
- std::vector<nc_color>    colors;
- for (size_t i = 0; i < responses.size(); i++) {
-     if (responses[i].trial > 0) {  // dialogue w/ a % chance to work
-         options.push_back(
-             rmp_format(
-                 _("<talk option>%1$c: [%2$s %3$d%%] %4$s"),
-                 char('a' + i),                           // option letter
-                 talk_trial_text[responses[i].trial],     // trial type
-                 trial_chance(responses[i], alpha, beta), // trial % chance
-                 responses[i].text.c_str()                // response
-             )
-         );
-     }
-     else { // regular dialogue
-         options.push_back(
-             rmp_format(
-                 _("<talk option>%1$c: %2$s"),
-                 char('a' + i),            // option letter
-                 responses[i].text.c_str() // response
-             )
-         );
-     }
-
-     parse_tags(options.back(), alpha, beta);
-     if (responses[i].text[0] == '!')
-         colors.push_back(c_red);
-     else if (responses[i].text[0] == '*')
-         colors.push_back(c_ltred);
-     else if (responses[i].text[0] == '&')
-         colors.push_back(c_green);
-     else
-         colors.push_back(c_white);
- }
-
- for (int i = 2; i < (FULL_SCREEN_HEIGHT - 1); i++) {
-  for (int j = 1; j < (FULL_SCREEN_WIDTH - 1); j++) {
-   if (j != (FULL_SCREEN_WIDTH / 2) + 1)
-    mvwputch(win, i, j, c_black, ' ');
-  }
- }
-
- int curline = FULL_SCREEN_HEIGHT - 2, curhist = 1;
- nc_color col;
- while (curhist <= (int)history.size() && curline > 0) {
-  if (curhist <= hilight_lines)
-   col = c_red;
-  else
-   col = c_dkgray;
-  mvwprintz(win, curline, 1, col, history[history.size() - curhist].c_str());
-  curline--;
-  curhist++;
- }
-
-    curline = 3;
-    for (size_t i = 0; i < options.size(); i++) {
-        folded = foldstring(options[i], (FULL_SCREEN_WIDTH / 2) - 4);
-        for( size_t j = 0; j < folded.size(); ++j ) {
-            mvwprintz(win, curline, (FULL_SCREEN_WIDTH / 2) + 2, colors[i],
-                        ((j == 0 ? "" : "   ") + folded[j]).c_str());
-            curline++;
-        }
-    }
-    mvwprintz(win, curline + 2, (FULL_SCREEN_WIDTH / 2) + 2, c_magenta, _("L: Look at"));
-    mvwprintz(win, curline + 3, (FULL_SCREEN_WIDTH / 2) + 2, c_magenta, _("S: Size up stats"));
-
-    wrefresh(win);
-
- int ch;
- bool okay;
- do {
-  do {
-   ch = getch();
-   if (special_talk(ch) == TALK_NONE)
-    ch -= 'a';
-  } while (special_talk(ch) == TALK_NONE && (ch < 0 || ch >= (int)options.size()));
-  okay = false;
-  if (special_talk(ch) != TALK_NONE)
-   okay = true;
-  else if (colors[ch] == c_white || colors[ch] == c_green)
-   okay = true;
-  else if (colors[ch] == c_red && query_yn(_("You may be attacked! Proceed?")))
-   okay = true;
-  else if (colors[ch] == c_ltred && query_yn(_("You'll be helpless! Proceed?")))
-   okay = true;
- } while (!okay);
- history.push_back("");
-
- if (special_talk(ch) != TALK_NONE)
-  return special_talk(ch);
-
- std::string response_printed = rmp_format(_("<you say something>You: %s"), responses[ch].text.c_str());
- folded = foldstring(response_printed, FULL_SCREEN_WIDTH / 2);
- for( size_t i = 0; i < folded.size(); ++i ){
-   history.push_back(folded[i]);
-   hilight_lines++;
- }
-
- talk_response chosen = responses[ch];
- if (chosen.mission_index != -1)
-  beta->chatbin.mission_selected = chosen.mission_index;
- if (chosen.tempvalue != -1)
-  beta->chatbin.tempvalue = chosen.tempvalue;
- if (chosen.skill != NULL)
-  beta->chatbin.skill = chosen.skill;
- if (!chosen.style.empty())
-  beta->chatbin.style = chosen.style;
-
- talk_function effect;
- if (chosen.trial == TALK_TRIAL_NONE ||
-     rng(0, 99) < trial_chance(chosen, alpha, beta)) {
-  if (chosen.trial != TALK_TRIAL_NONE)
-    alpha->practice( "speech", (100 - trial_chance(chosen, alpha, beta)) / 10 );
-  (effect.*chosen.effect_success)(beta);
-  beta->op_of_u += chosen.opinion_success;
-  if (beta->turned_hostile()) {
-   beta->make_angry();
-   done = true;
-  }
-  return chosen.success;
- } else {
-   alpha->practice( "speech", (100 - trial_chance(chosen, alpha, beta)) / 7 );
-  (effect.*chosen.effect_failure)(beta);
-  beta->op_of_u += chosen.opinion_failure;
-  if (beta->turned_hostile()) {
-   beta->make_angry();
-   done = true;
-  }
-  return chosen.failure;
- }
- return TALK_NONE; // Shouldn't ever happen
-}
-
-talk_topic special_talk(char ch)
-{
- switch (ch) {
-  case 'L':
-  case 'l':
-   return TALK_LOOK_AT;
-  case 'S':
-  case 's':
-   return TALK_SIZE_UP;
-  case 'O':
-  case 'o':
-   return TALK_OPINION;
-  default:
-   return TALK_NONE;
- }
- return TALK_NONE;
-}
-
-bool trade(npc *p, int cost, std::string deal) {
-    WINDOW* w_head = newwin(4, FULL_SCREEN_WIDTH,
-                            (TERMY > FULL_SCREEN_HEIGHT) ? (TERMY - FULL_SCREEN_HEIGHT) / 2 : 0,
-                            (TERMX > FULL_SCREEN_WIDTH) ? (TERMX - FULL_SCREEN_WIDTH) / 2 : 0);
-    WINDOW* w_them = newwin(FULL_SCREEN_HEIGHT - 4, FULL_SCREEN_WIDTH / 2,
-                            4 + ((TERMY > FULL_SCREEN_HEIGHT) ? (TERMY - FULL_SCREEN_HEIGHT) / 2 : 0),
-                            (TERMX > FULL_SCREEN_WIDTH) ? (TERMX - FULL_SCREEN_WIDTH) / 2 : 0);
-    WINDOW* w_you = newwin(FULL_SCREEN_HEIGHT - 4, FULL_SCREEN_WIDTH - (FULL_SCREEN_WIDTH / 2),
-                            4 + ((TERMY > FULL_SCREEN_HEIGHT) ? (TERMY - FULL_SCREEN_HEIGHT) / 2 : 0),
-                            (FULL_SCREEN_WIDTH / 2) + ((TERMX > FULL_SCREEN_WIDTH) ? (TERMX - FULL_SCREEN_WIDTH) / 2 : 0));
-    WINDOW* w_tmp;
-    std::string header_message = _("\
-Trading with %s\n\
-TAB key to switch lists, letters to pick items, Enter to finalize, Esc to quit,\n\
-? to get information on an item.");
-    mvwprintz(w_head, 0, 0, c_white, header_message.c_str(), p->name.c_str());
-
-    // Set up line drawings
-    for (int i = 0; i < FULL_SCREEN_WIDTH; i++) {
-        mvwputch(w_head, 3, i, c_white, LINE_OXOX);
-    }
-    wrefresh(w_head);
-    // End of line drawings
-
-    // Populate the list of what the NPC is willing to buy, and the prices they pay
-    // Note that the NPC's barter skill is factored into these prices.
-    std::vector<item*> theirs, yours;
-    std::vector<int> their_price, your_price;
-    p->init_selling(theirs, their_price);
-    p->init_buying(g->u.inv, yours, your_price);
-    std::vector<bool> getting_theirs, getting_yours;
-    getting_theirs.resize(theirs.size());
-    getting_yours.resize(yours.size());
-
-    // Adjust the prices based on your barter skill.
-    for (size_t i = 0; i < their_price.size(); i++) {
-        their_price[i] *= (price_adjustment(p->skillLevel("barter") - g->u.skillLevel("barter")) +
-                     (p->int_cur - g->u.int_cur) / 20.0);
-        getting_theirs[i] = false;
-    }
-    for (size_t i = 0; i < your_price.size(); i++) {
-        your_price[i] *= (price_adjustment(g->u.skillLevel("barter") - p->skillLevel("barter")) +
-                    (g->u.int_cur - p->int_cur) / 20.0);
-        getting_yours[i] = false;
-    }
-
-    long cash = cost;       // How much cash you get in the deal (negative = losing money)
-    bool focus_them = true; // Is the focus on them?
-    bool update = true;     // Re-draw the screen?
-    int  them_off = 0, you_off = 0; // Offset from the start of the list
-    signed char ch, help;
-
-    do {
-        if (update) { // Time to re-draw
-            update = false;
-            // Draw borders, one of which is highlighted
-            werase(w_them);
-            werase(w_you);
-            for (int i = 1; i < FULL_SCREEN_WIDTH; i++) {
-                mvwputch(w_head, 3, i, c_white, LINE_OXOX);
-            }
-            mvwprintz(w_head, 3, 30,
-                    (cash < 0 && (int)g->u.cash >= cash * -1) || (cash >= 0 && (int)p->cash  >= cash) ?
-                    c_green : c_red, (cash >= 0 ? _("Profit $%.2f") : _("Cost $%.2f")),
-                    (double)std::abs(cash)/100);
-
-            if (deal != "") {
-                mvwprintz(w_head, 3, 45, (cost < 0 ? c_ltred : c_ltgreen), deal.c_str());
-            }
-            draw_border(w_them, (focus_them ? c_yellow : BORDER_COLOR));
-            draw_border(w_you, (!focus_them ? c_yellow : BORDER_COLOR));
-
-            mvwprintz(w_them, 0, 2, (cash < 0 || (int)p->cash >= cash ? c_green : c_red),
-                        _("%s: $%.2f"), p->name.c_str(), (double)p->cash/100);
-            mvwprintz(w_you,  0, 2, (cash > 0 || (int)g->u.cash >= cash*-1 ? c_green:c_red),
-                        _("You: $%.2f"), (double)g->u.cash/100);
-            // Draw their list of items, starting from them_off
-            for (int i = them_off; i < (int)theirs.size() && i < (17 + them_off); i++) {
-                mvwprintz(w_them, i - them_off + 1, 1,
-                        (getting_theirs[i] ? c_white : c_ltgray), "%c %c %s - $%.2f",
-                        char((i -them_off) + 'a'), (getting_theirs[i] ? '+' : '-'),
-                        utf8_substr(theirs[i]->tname(), 0, 25).c_str(),
-                        (double)their_price[i]/100);
-            }
-            if (them_off > 0) {
-                mvwprintw(w_them, 19, 1, "< Back");
-            }
-            if (them_off + 17 < (int)theirs.size()) {
-                mvwprintw(w_them, 19, 9, "More >");
-            }
-            // Draw your list of items, starting from you_off
-            for (int i = you_off; i < (int)yours.size() && (i < (17 + you_off)) ; i++) {
-                mvwprintz(w_you, i - you_off + 1, 1,
-                        (getting_yours[i] ? c_white : c_ltgray), "%c %c %s - $%.2f",
-                        char((i -you_off) + 'a'), (getting_yours[i] ? '+' : '-'),
-                        utf8_substr(yours[i]->tname(), 0,25).c_str(),
-                        (double)your_price[i]/100);
-            }
-            if (you_off > 0) {
-                mvwprintw(w_you, 19, 1, _("< Back"));
-            }
-            if (you_off + 17 < (int)yours.size()) {
-                mvwprintw(w_you, 19, 9, _("More >"));
-            }
-            wrefresh(w_head);
-            wrefresh(w_them);
-            wrefresh(w_you);
-        } // Done updating the screen
-        ch = getch();
-        switch (ch) {
-            case '\t':
-                focus_them = !focus_them;
-                update = true;
-                break;
-            case '<':
-                if (focus_them) {
-                    if (them_off > 0) {
-                        them_off -= 17;
-                        update = true;
-                    }
-                } else {
-                    if (you_off > 0) {
-                        you_off -= 17;
-                        update = true;
-                    }
-                }
-                break;
-            case '>':
-                if (focus_them) {
-                    if (them_off + 17 < (int)theirs.size()) {
-                        them_off += 17;
-                        update = true;
-                    }
-                } else {
-                    if (you_off + 17 < (int)yours.size()) {
-                        you_off += 17;
-                        update = true;
-                    }
-                }
-                break;
-            case '?':
-                update = true;
-                w_tmp = newwin(3, 21, 1+(TERMY-FULL_SCREEN_HEIGHT)/2, 30+(TERMX-FULL_SCREEN_WIDTH)/2);
-                mvwprintz(w_tmp, 1, 1, c_red, _("Examine which item?"));
-                draw_border(w_tmp);
-                wrefresh(w_tmp);
-                help = getch();
-                help -= 'a';
-                werase(w_tmp);
-                delwin(w_tmp);
-                mvwprintz(w_head, 0, 0, c_white, header_message.c_str(), p->name.c_str());
-                wrefresh(w_head);
-                update = true;
-                if (focus_them) {
-                    help += them_off;
-                    if (help >= 0 && help < (int)theirs.size()) {
-                        popup(theirs[help]->info(), PF_NONE);
-                    }
-                } else {
-                    help += you_off;
-                    if (help >= 0 && help < (int)yours.size()) {
-                        popup(yours[help]->info(), PF_NONE);
-                    }
-                }
-                break;
-            case '\n': // Check if we have enough cash...
-            case 'T'://T means the trade was forced.
-                // The player must pay cash, and it should not put the player negative.
-                if(cash < 0 && (int)g->u.cash < cash * -1) {
-                    popup(_("Not enough cash!  You have $%.2f, price is $%.2f."), (double)g->u.cash/100, -(double)cash/100);
-                    update = true;
-                    ch = ' ';
-                //Else the player gets cash, and it should not make the NPC negative.
-                } else if (cash > 0 && (int)p->cash < cash  && ch != 'T') {
-                    popup(_("Not enough cash! %s has $%.2f, but the price is $%.2f. Use (T) to force the trade."),
-                              p->name.c_str(), (double)p->cash/100, (double)cash/100);
-                    update = true;
-                    ch = ' ';
-                }
-                break;
-            default: // Letters & such
-                if (ch >= 'a' && ch <= 'z') {
-                    ch -= 'a';
-                    if (focus_them) {
-                        ch += them_off;
-                        if (ch < (int)theirs.size()) {
-                            getting_theirs[ch] = !getting_theirs[ch];
-                            if (getting_theirs[ch]) {
-                                cash -= their_price[ch];
-                            } else {
-                                cash += their_price[ch];
-                            }
-                            update = true;
-                        }
-                    } else { // Focus is on the player's inventory
-                        ch += you_off;
-                        if (ch < (int)yours.size()) {
-                            getting_yours[ch] = !getting_yours[ch];
-                            if (getting_yours[ch]) {
-                                cash += your_price[ch];
-                            } else {
-                                cash -= your_price[ch];
-                            }
-                            update = true;
-                        }
-                    }
-                    ch = 0;
-                }
-        }
-    } while (ch != KEY_ESCAPE && ch != '\n' && ch != 'T');
-
-    if (ch == '\n' || ch == 'T') {
-        inventory newinv;
-        int practice = 0;
-        std::vector<item*> removing;
-        for (size_t i = 0; i < yours.size(); i++) {
-            if (getting_yours[i]) {
-                newinv.push_back(*yours[i]);
-                practice++;
-                removing.push_back(yours[i]);
-            }
-        }
-        // Do it in two passes, so removing items doesn't corrupt yours[]
-        for (size_t i = 0; i < removing.size(); i++) {
-            g->u.i_rem(removing[i]);
-        }
-
-        for (size_t i = 0; i < theirs.size(); i++) {
-            item tmp = *theirs[i];
-            if (getting_theirs[i]) {
-                practice += 2;
-                g->u.inv.push_back(tmp);
-            } else {
-                newinv.push_back(tmp);
-            }
-        }
-        g->u.practice( "barter", practice / 2 );
-        p->inv = newinv;
-        if(ch == 'T' && cash > 0) { //Trade was forced, give the NPC's cash to the player.
-            p->op_of_u.owed += (cash - p->cash);
-            g->u.cash += p->cash;
-            p->cash = 0;
+        return response;
+    } else if( topic == "TALK_FRIEND" ) {
+        return _( "What is it?" );
+    } else if( topic == "TALK_DESCRIBE_MISSION" ) {
+        switch( p->mission ) {
+            case NPC_MISSION_SHELTER:
+                return _( "I'm holing up here for safety." );
+            case NPC_MISSION_SHOPKEEP:
+                return _( "I run the shop here." );
+            case NPC_MISSION_GUARD:
+            case NPC_MISSION_GUARD_ALLY:
+            case NPC_MISSION_GUARD_PATROL:
+                return _( "I'm guarding this location." );
+            case NPC_MISSION_NULL:
+                return p->myclass.obj().get_job_description();
+            default:
+                return "ERROR: Someone forgot to code an npc_mission text.";
+        } // switch (p->mission)
+    } else if( topic == "TALK_SHOUT" ) {
+        alpha->shout();
+        if( alpha->is_deaf() ) {
+            return _( "&You yell, but can't hear yourself." );
         } else {
-            g->u.cash += cash;
-            p->cash   -= cash;
+            return _( "&You yell." );
+        }
+    } else if( topic == "TALK_SIZE_UP" ) {
+        ///\EFFECT_PER affects whether player can size up NPCs
+
+        ///\EFFECT_INT slightly affects whether player can size up NPCs
+        int ability = g->u.per_cur * 3 + g->u.int_cur;
+        if( ability <= 10 ) {
+            return "&You can't make anything out.";
+        }
+
+        if( p->is_friend() || ability > 100 ) {
+            ability = 100;
+        }
+
+        std::string info = "&";
+        int str_range = static_cast<int>( 100 / ability );
+        int str_min = static_cast<int>( p->str_max / str_range ) * str_range;
+        info += string_format( _( "Str %d - %d" ), str_min, str_min + str_range );
+
+        if( ability >= 40 ) {
+            int dex_range = static_cast<int>( 160 / ability );
+            int dex_min = static_cast<int>( p->dex_max / dex_range ) * dex_range;
+            info += string_format( _( "  Dex %d - %d" ), dex_min, dex_min + dex_range );
+        }
+
+        if( ability >= 50 ) {
+            int int_range = static_cast<int>( 200 / ability );
+            int int_min = static_cast<int>( p->int_max / int_range ) * int_range;
+            info += string_format( _( "  Int %d - %d" ), int_min, int_min + int_range );
+        }
+
+        if( ability >= 60 ) {
+            int per_range = static_cast<int>( 240 / ability );
+            int per_min = static_cast<int>( p->per_max / per_range ) * per_range;
+            info += string_format( _( "  Per %d - %d" ), per_min, per_min + per_range );
+        }
+
+        needs_rates rates = p->calc_needs_rates();
+        if( ability >= 100 - ( p->get_fatigue() / 10 ) ) {
+            std::string how_tired;
+            if( p->get_fatigue() > EXHAUSTED ) {
+                how_tired = _( "Exhausted" );
+            } else if( p->get_fatigue() > DEAD_TIRED ) {
+                how_tired = _( "Dead tired" );
+            } else if( p->get_fatigue() > TIRED ) {
+                how_tired = _( "Tired" );
+            } else {
+                how_tired = _( "Not tired" );
+                if( ability >= 100 ) {
+                    time_duration sleep_at = 5_minutes * ( TIRED - p->get_fatigue() ) /
+                                             rates.fatigue;
+                    how_tired += _( ".  Will need sleep in " ) + to_string_approx( sleep_at );
+                }
+            }
+            info += "\n" + how_tired;
+        }
+        if( ability >= 100 ) {
+            if( p->get_thirst() < 100 ) {
+                time_duration thirst_at = 5_minutes * ( 100 - p->get_thirst() ) / rates.thirst;
+                if( thirst_at > 1_hours ) {
+                    info += _( "\nWill need water in " ) + to_string_approx( thirst_at );
+                }
+            } else {
+                info += _( "\nThirsty" );
+            }
+            if( p->get_hunger() < 100 ) {
+                time_duration hunger_at = 5_minutes * ( 100 - p->get_hunger() ) / rates.hunger;
+                if( hunger_at > 1_hours ) {
+                    info += _( "\nWill need food in " ) + to_string_approx( hunger_at );
+                }
+            } else {
+                info += _( "\nHungry" );
+            }
+        }
+        return info;
+    } else if( topic == "TALK_LOOK_AT" ) {
+        return "&" + p->short_description();
+    } else if( topic == "TALK_OPINION" ) {
+        return "&" + p->opinion_text();
+    } else if( topic == "TALK_USE_ITEM" ) {
+        return give_item_to( *p, true, false );
+    } else if( topic == "TALK_GIVE_ITEM" ) {
+        return give_item_to( *p, false, true );
+        // Maybe TODO: Allow an option to "just take it, use it if you want"
+    } else if( topic == "TALK_MIND_CONTROL" ) {
+        p->companion_mission_role_id.clear();
+        p->set_attitude( NPCATT_FOLLOW );
+        std::vector<int> followerlist = g->get_follower_list();
+        int npc_id = p->getID();
+        if( !std::any_of( followerlist.begin(), followerlist.end(), [npc_id]( int i ) {
+        return i == npc_id;
+    } ) ) {
+            g->add_npc_follower( npc_id );
+            return _( "YES, MASTER!" );
         }
     }
-    werase(w_head);
-    werase(w_you);
-    werase(w_them);
-    wrefresh(w_head);
-    wrefresh(w_you);
-    wrefresh(w_them);
-    delwin(w_head);
-    delwin(w_you);
-    delwin(w_them);
-    if (ch == '\n') {
+
+    return string_format( "I don't know what to say for %s. (BUG (npctalk.cpp:dynamic_line))",
+                          topic );
+}
+
+talk_response &dialogue::add_response( const std::string &text, const std::string &r,
+                                       const bool first )
+{
+    talk_response result = talk_response();
+    result.truetext = text;
+    result.truefalse_condition = []( const dialogue & ) {
+        return true;
+    };
+    result.success.next_topic = talk_topic( r );
+    if( first ) {
+        responses.insert( responses.begin(), result );
+        return responses.front();
+    } else {
+        responses.push_back( result );
+        return responses.back();
+    }
+}
+
+talk_response &dialogue::add_response_done( const std::string &text )
+{
+    return add_response( text, "TALK_DONE" );
+}
+
+talk_response &dialogue::add_response_none( const std::string &text )
+{
+    return add_response( text, "TALK_NONE" );
+}
+
+talk_response &dialogue::add_response( const std::string &text, const std::string &r,
+                                       talkfunction_ptr effect_success, const bool first )
+{
+    talk_response &result = add_response( text, r, first );
+    result.success.set_effect( effect_success );
+    return result;
+}
+
+talk_response &dialogue::add_response( const std::string &text, const std::string &r,
+                                       std::function<void( npc & )> effect_success,
+                                       dialogue_consequence consequence, const bool first )
+{
+    talk_response &result = add_response( text, r, first );
+    result.success.set_effect_consequence( effect_success, consequence );
+    return result;
+}
+
+talk_response &dialogue::add_response( const std::string &text, const std::string &r,
+                                       mission *miss, const bool first )
+{
+    if( miss == nullptr ) {
+        debugmsg( "tried to select null mission" );
+    }
+    talk_response &result = add_response( text, r, first );
+    result.mission_selected = miss;
+    return result;
+}
+
+talk_response &dialogue::add_response( const std::string &text, const std::string &r,
+                                       const skill_id &skill, const bool first )
+{
+    talk_response &result = add_response( text, r, first );
+    result.skill = skill;
+    return result;
+}
+
+talk_response &dialogue::add_response( const std::string &text, const std::string &r,
+                                       const martialart &style, const bool first )
+{
+    talk_response &result = add_response( text, r, first );
+    result.style = style.id;
+    return result;
+}
+
+talk_response &dialogue::add_response( const std::string &text, const std::string &r,
+                                       const itype_id &item_type, const bool first )
+{
+    if( item_type == "null" ) {
+        debugmsg( "explicitly specified null item" );
+    }
+
+    talk_response &result = add_response( text, r, first );
+    result.success.next_topic.item_type = item_type;
+    return result;
+}
+
+void dialogue::gen_responses( const talk_topic &the_topic )
+{
+    const auto &topic = the_topic.id; // for compatibility, later replace it in the code below
+    const auto p = beta; // for compatibility, later replace it in the code below
+    auto &ret = responses; // for compatibility, later replace it in the code below
+    ret.clear();
+    const auto iter = json_talk_topics.find( topic );
+    if( iter != json_talk_topics.end() ) {
+        json_talk_topic &jtt = iter->second;
+        if( jtt.gen_responses( *this ) ) {
+            return;
+        }
+    }
+
+    if( topic == "TALK_MISSION_LIST" ) {
+        if( p->chatbin.missions.size() == 1 ) {
+            add_response( _( "Tell me about it." ), "TALK_MISSION_OFFER",
+                          p->chatbin.missions.front(), true );
+        } else {
+            for( auto &mission : p->chatbin.missions ) {
+                add_response( mission->get_type().name, "TALK_MISSION_OFFER", mission, true );
+            }
+        }
+    } else if( topic == "TALK_MISSION_LIST_ASSIGNED" ) {
+        if( missions_assigned.size() == 1 ) {
+            add_response( _( "I have news." ), "TALK_MISSION_INQUIRE", missions_assigned.front() );
+        } else {
+            for( auto &miss_it : missions_assigned ) {
+                add_response( miss_it->get_type().name, "TALK_MISSION_INQUIRE", miss_it );
+            }
+        }
+    } else if( topic == "TALK_FREE_MERCHANT_STOCKS" ) {
+        add_response( _( "Who are you?" ), "TALK_FREE_MERCHANT_STOCKS_NEW", true );
+        static const std::vector<itype_id> wanted = {{
+                "jerky", "meat_smoked", "fish_smoked",
+                "cooking_oil", "cooking_oil2", "cornmeal", "flour",
+                "fruit_wine", "beer", "sugar",
+            }
+        };
+
+        for( const auto &id : wanted ) {
+            if( g->u.charges_of( id ) > 0 ) {
+                const std::string msg = string_format( _( "Delivering %s." ), item::nname( id ) );
+                add_response( msg, "TALK_DELIVER_ASK", id, true );
+            }
+        }
+
+    } else if( topic == "TALK_DELIVER_ASK" ) {
+        if( the_topic.item_type == "null" ) {
+            debugmsg( "delivering nulls" );
+        }
+        add_response( _( "Works for me." ), "TALK_DELIVER_CONFIRM", the_topic.item_type );
+        add_response( _( "Maybe later." ), "TALK_DONE" );
+    } else if( topic == "TALK_DELIVER_CONFIRM" ) {
+        bulk_trade_accept( *p, the_topic.item_type );
+        add_response_done( _( "You might be seeing more of me..." ) );
+    } else if( topic == "TALK_RANCH_NURSE_HIRE" ) {
+        if( g->u.charges_of( "bandages" ) > 0 ) {
+            add_response( _( "Delivering bandages." ), "TALK_DELIVER_ASK", itype_id( "bandages" ) );
+        }
+    } else if( topic == "TALK_TRAIN" ) {
+        if( !g->u.backlog.empty() && g->u.backlog.front().id() == activity_id( "ACT_TRAIN" ) ) {
+            player_activity &backlog = g->u.backlog.front();
+            std::stringstream resume;
+            resume << _( "Yes, let's resume training " );
+            const skill_id skillt( backlog.name );
+            // TODO: This is potentially dangerous. A skill and a martial art
+            // could have the same ident!
+            if( !skillt.is_valid() ) {
+                auto &style = matype_id( backlog.name ).obj();
+                resume << style.name;
+                add_response( resume.str(), "TALK_TRAIN_START", style );
+            } else {
+                resume << skillt.obj().name();
+                add_response( resume.str(), "TALK_TRAIN_START", skillt );
+            }
+        }
+        std::vector<matype_id> styles = p->styles_offered_to( g->u );
+        std::vector<skill_id> trainable = p->skills_offered_to( g->u );
+        if( trainable.empty() && styles.empty() ) {
+            add_response_none( _( "Oh, okay." ) );
+            return;
+        }
+        for( auto &style_id : styles ) {
+            auto &style = style_id.obj();
+            const int cost = calc_ma_style_training_cost( *p, style.id );
+            //~Martial art style (cost in dollars)
+            const std::string text = string_format( cost > 0 ? _( "%s ( cost $%d )" ) : "%s",
+                                                    _( style.name ), cost / 100 );
+            add_response( text, "TALK_TRAIN_START", style );
+        }
+        for( auto &trained : trainable ) {
+            const int cost = calc_skill_training_cost( *p, trained );
+            const int cur_level = g->u.get_skill_level( trained );
+            //~Skill name: current level -> next level (cost in dollars)
+            std::string text = string_format( cost > 0 ? _( "%s: %d -> %d (cost $%d)" ) :
+                                              _( "%s: %d -> %d" ),
+                                              trained.obj().name(), cur_level, cur_level + 1,
+                                              cost / 100 );
+            add_response( text, "TALK_TRAIN_START", trained );
+        }
+        add_response_none( _( "Eh, never mind." ) );
+    } else if( topic == "TALK_HOW_MUCH_FURTHER" ) {
+        add_response_none( _( "Okay, thanks." ) );
+        add_response_done( _( "Let's keep moving." ) );
+    }
+
+    if( g->u.has_trait( trait_DEBUG_MIND_CONTROL ) && !p->is_friend() ) {
+        add_response( _( "OBEY ME!" ), "TALK_MIND_CONTROL" );
+        add_response_done( _( "Bye." ) );
+    }
+
+    if( ret.empty() ) {
+        add_response_done( _( "Bye." ) );
+    }
+}
+
+int parse_mod( const dialogue &d, const std::string &attribute, const int factor )
+{
+    player &u = *d.alpha;
+    npc &p = *d.beta;
+    int modifier = 0;
+    if( attribute == "ANGER" ) {
+        modifier = p.op_of_u.anger;
+    } else if( attribute == "FEAR" ) {
+        modifier = p.op_of_u.fear;
+    } else if( attribute == "TRUST" ) {
+        modifier = p.op_of_u.trust;
+    } else if( attribute == "VALUE" ) {
+        modifier = p.op_of_u.value;
+    } else if( attribute == "POS_FEAR" ) {
+        modifier = std::max( 0, p.op_of_u.fear );
+    } else if( attribute == "AGGRESSION" ) {
+        modifier = p.personality.aggression;
+    } else if( attribute == "ALTRUISM" ) {
+        modifier = p.personality.altruism;
+    } else if( attribute == "BRAVERY" ) {
+        modifier = p.personality.bravery;
+    } else if( attribute == "COLLECTOR" ) {
+        modifier = p.personality.collector;
+    } else if( attribute == "MISSIONS" ) {
+        modifier = p.assigned_missions_value() / OWED_VAL;
+    } else if( attribute == "U_INTIMIDATE" ) {
+        modifier = u.intimidation();
+    } else if( attribute == "NPC_INTIMIDATE" ) {
+        modifier = p.intimidation();
+    }
+    modifier *= factor;
+    return modifier;
+}
+
+int talk_trial::calc_chance( const dialogue &d ) const
+{
+    player &u = *d.alpha;
+    if( u.has_trait( trait_DEBUG_MIND_CONTROL ) ) {
+        return 100;
+    }
+    const social_modifiers &u_mods = u.get_mutation_social_mods();
+
+    npc &p = *d.beta;
+    int chance = difficulty;
+    switch( type ) {
+        case NUM_TALK_TRIALS:
+            dbg( D_ERROR ) << "called calc_chance with invalid talk_trial value: " << type;
+            break;
+        case TALK_TRIAL_LIE:
+            chance += u.talk_skill() - p.talk_skill() + p.op_of_u.trust * 3;
+            chance += u_mods.lie;
+
+            //come on, who would suspect a robot of lying?
+            if( u.has_bionic( bionic_id( "bio_voice" ) ) ) {
+                chance += 10;
+            }
+            if( u.has_bionic( bionic_id( "bio_face_mask" ) ) ) {
+                chance += 20;
+            }
+            break;
+        case TALK_TRIAL_PERSUADE:
+            chance += u.talk_skill() - static_cast<int>( p.talk_skill() / 2 ) +
+                      p.op_of_u.trust * 2 + p.op_of_u.value;
+            chance += u_mods.persuade;
+
+            if( u.has_bionic( bionic_id( "bio_face_mask" ) ) ) {
+                chance += 10;
+            }
+            if( u.has_bionic( bionic_id( "bio_deformity" ) ) ) {
+                chance -= 50;
+            }
+            if( u.has_bionic( bionic_id( "bio_voice" ) ) ) {
+                chance -= 20;
+            }
+            break;
+        case TALK_TRIAL_INTIMIDATE:
+            chance += u.intimidation() - p.intimidation() + p.op_of_u.fear * 2 -
+                      p.personality.bravery * 2;
+            chance += u_mods.intimidate;
+
+            if( u.has_bionic( bionic_id( "bio_face_mask" ) ) ) {
+                chance += 10;
+            }
+            if( u.has_bionic( bionic_id( "bio_armor_eyes" ) ) ) {
+                chance += 10;
+            }
+            if( u.has_bionic( bionic_id( "bio_deformity" ) ) ) {
+                chance += 20;
+            }
+            if( u.has_bionic( bionic_id( "bio_voice" ) ) ) {
+                chance += 20;
+            }
+            break;
+        case TALK_TRIAL_NONE:
+            chance = 100;
+            break;
+        case TALK_TRIAL_CONDITION:
+            chance = condition( d ) ? 100 : 0;
+            break;
+    }
+    for( const auto &this_mod : modifiers ) {
+        chance += parse_mod( d, this_mod.first, this_mod.second );
+    }
+
+    return std::max( 0, std::min( 100, chance ) );
+}
+
+bool talk_trial::roll( dialogue &d ) const
+{
+    player &u = *d.alpha;
+    if( type == TALK_TRIAL_NONE || u.has_trait( trait_DEBUG_MIND_CONTROL ) ) {
         return true;
     }
+    const int chance = calc_chance( d );
+    const bool success = rng( 0, 99 ) < chance;
+    if( success ) {
+        u.practice( skill_speech, ( 100 - chance ) / 10 );
+    } else {
+        u.practice( skill_speech, ( 100 - chance ) / 7 );
+    }
+    return success;
+}
+
+int topic_category( const talk_topic &the_topic )
+{
+    const auto &topic = the_topic.id;
+    // TODO: ideally, this would be a property of the topic itself.
+    // How this works: each category has a set of topics that belong to it, each set is checked
+    // for the given topic and if a set contains, the category number is returned.
+    static const std::unordered_set<std::string> topic_1 = { {
+            "TALK_MISSION_START", "TALK_MISSION_DESCRIBE", "TALK_MISSION_OFFER",
+            "TALK_MISSION_ACCEPTED", "TALK_MISSION_REJECTED", "TALK_MISSION_ADVICE",
+            "TALK_MISSION_INQUIRE", "TALK_MISSION_SUCCESS", "TALK_MISSION_SUCCESS_LIE",
+            "TALK_MISSION_FAILURE", "TALK_MISSION_REWARD", "TALK_MISSION_END",
+            "TALK_MISSION_DESCRIBE_URGENT"
+        }
+    };
+    if( topic_1.count( topic ) > 0 ) {
+        return 1;
+    }
+    static const std::unordered_set<std::string> topic_2 = { {
+            "TALK_SHARE_EQUIPMENT", "TALK_GIVE_EQUIPMENT", "TALK_DENY_EQUIPMENT"
+        }
+    };
+    if( topic_2.count( topic ) > 0 ) {
+        return 2;
+    }
+    static const std::unordered_set<std::string> topic_3 = { {
+            "TALK_SUGGEST_FOLLOW", "TALK_AGREE_FOLLOW", "TALK_DENY_FOLLOW",
+        }
+    };
+    if( topic_3.count( topic ) > 0 ) {
+        return 3;
+    }
+    static const std::unordered_set<std::string> topic_4 = { {
+            "TALK_COMBAT_ENGAGEMENT",
+        }
+    };
+    if( topic_4.count( topic ) > 0 ) {
+        return 4;
+    }
+    static const std::unordered_set<std::string> topic_5 = { {
+            "TALK_COMBAT_COMMANDS",
+        }
+    };
+    if( topic_5.count( topic ) > 0 ) {
+        return 5;
+    }
+    static const std::unordered_set<std::string> topic_6 = { {
+            "TALK_TRAIN", "TALK_TRAIN_START", "TALK_TRAIN_FORCE"
+        }
+    };
+    if( topic_6.count( topic ) > 0 ) {
+        return 6;
+    }
+    static const std::unordered_set<std::string> topic_7 = { {
+            "TALK_MISC_RULES",
+        }
+    };
+    if( topic_7.count( topic ) > 0 ) {
+        return 7;
+    }
+    static const std::unordered_set<std::string> topic_8 = { {
+            "TALK_AIM_RULES",
+        }
+    };
+    if( topic_8.count( topic ) > 0 ) {
+        return 8;
+    }
+    static const std::unordered_set<std::string> topic_9 = { {
+            "TALK_FRIEND", "TALK_GIVE_ITEM", "TALK_USE_ITEM",
+        }
+    };
+    if( topic_9.count( topic ) > 0 ) {
+        return 9;
+    }
+    static const std::unordered_set<std::string> topic_99 = { {
+            "TALK_SIZE_UP", "TALK_LOOK_AT", "TALK_OPINION", "TALK_SHOUT"
+        }
+    };
+    if( topic_99.count( topic ) > 0 ) {
+        return 99;
+    }
+    return -1; // Not grouped with other topics
+}
+
+void parse_tags( std::string &phrase, const player &u, const player &me )
+{
+    phrase = remove_color_tags( phrase );
+
+    size_t fa;
+    size_t fb;
+    std::string tag;
+    do {
+        fa = phrase.find( '<' );
+        fb = phrase.find( '>' );
+        int l = fb - fa + 1;
+        if( fa != std::string::npos && fb != std::string::npos ) {
+            tag = phrase.substr( fa, fb - fa + 1 );
+        } else {
+            return;
+        }
+
+        const std::string &replacement = SNIPPET.random_from_category( tag );
+        if( !replacement.empty() ) {
+            phrase.replace( fa, l, replacement );
+            continue;
+        }
+
+        // Special, dynamic tags go here
+        if( tag == "<yrwp>" ) {
+            phrase.replace( fa, l, remove_color_tags( u.weapon.tname() ) );
+        } else if( tag == "<mywp>" ) {
+            if( !me.is_armed() ) {
+                phrase.replace( fa, l, _( "fists" ) );
+            } else {
+                phrase.replace( fa, l, remove_color_tags( me.weapon.tname() ) );
+            }
+        } else if( tag == "<ammo>" ) {
+            if( !me.weapon.is_gun() ) {
+                phrase.replace( fa, l, _( "BADAMMO" ) );
+            } else {
+                phrase.replace( fa, l, me.weapon.ammo_type()->name() );
+            }
+        } else if( tag == "<punc>" ) {
+            switch( rng( 0, 2 ) ) {
+                case 0:
+                    phrase.replace( fa, l, pgettext( "punctuation", "." ) );
+                    break;
+                case 1:
+                    phrase.replace( fa, l, pgettext( "punctuation", "..." ) );
+                    break;
+                case 2:
+                    phrase.replace( fa, l, pgettext( "punctuation", "!" ) );
+                    break;
+            }
+        } else if( tag == "<mypronoun>" ) {
+            std::string npcstr = me.male ? pgettext( "npc", "He" ) : pgettext( "npc", "She" );
+            phrase.replace( fa, l, npcstr );
+        } else if( !tag.empty() ) {
+            debugmsg( "Bad tag. '%s' (%d - %d)", tag.c_str(), fa, fb );
+            phrase.replace( fa, fb - fa + 1, "????" );
+        }
+    } while( fa != std::string::npos && fb != std::string::npos );
+}
+
+void dialogue::add_topic( const std::string &topic_id )
+{
+    topic_stack.push_back( talk_topic( topic_id ) );
+}
+
+void dialogue::add_topic( const talk_topic &topic )
+{
+    topic_stack.push_back( topic );
+}
+
+talk_data talk_response::create_option_line( const dialogue &d, const char letter )
+{
+    std::string ftext;
+    text = truefalse_condition( d ) ? truetext : falsetext;
+    // dialogue w/ a % chance to work
+    if( trial.type == TALK_TRIAL_NONE || trial.type == TALK_TRIAL_CONDITION ) {
+        // regular dialogue
+        //~ %1$c is an option letter and shouldn't be translated, %2$s is translated response text
+        ftext = string_format( pgettext( "talk option", "%1$c: %2$s" ), letter, text );
+    } else {
+        // dialogue w/ a % chance to work
+        //~ %1$c is an option letter and shouldn't be translated, %2$s is translated trial type, %3$d is a number, and %4$s is the translated response text
+        ftext = string_format( pgettext( "talk option", "%1$c: [%2$s %3$d%%] %4$s" ), letter,
+                               trial.name(), trial.calc_chance( d ), text );
+    }
+    parse_tags( ftext, *d.alpha, *d.beta );
+
+    nc_color color;
+    std::set<dialogue_consequence> consequences = get_consequences( d );
+    if( consequences.count( dialogue_consequence::hostile ) > 0 ) {
+        color = c_red;
+    } else if( text[0] == '*' || consequences.count( dialogue_consequence::helpless ) > 0 ) {
+        color = c_light_red;
+    } else if( text[0] == '&' || consequences.count( dialogue_consequence::action ) > 0 ) {
+        color = c_green;
+    } else {
+        color = c_white;
+    }
+    talk_data results;
+    results.first = color;
+    results.second = ftext;
+    return results;
+}
+
+std::set<dialogue_consequence> talk_response::get_consequences( const dialogue &d ) const
+{
+    int chance = trial.calc_chance( d );
+    if( chance >= 100 ) {
+        return { success.get_consequence( d ) };
+    } else if( chance <= 0 ) {
+        return { failure.get_consequence( d ) };
+    }
+
+    return {{ success.get_consequence( d ), failure.get_consequence( d ) }};
+}
+
+dialogue_consequence talk_effect_t::get_consequence( const dialogue &d ) const
+{
+    if( d.beta->op_of_u.anger + opinion.anger >= d.beta->hostile_anger_level() ) {
+        return dialogue_consequence::hostile;
+    }
+    return guaranteed_consequence;
+}
+
+const talk_topic &special_talk( char ch )
+{
+    static const std::map<char, talk_topic> key_map = {{
+            { 'L', talk_topic( "TALK_LOOK_AT" ) },
+            { 'S', talk_topic( "TALK_SIZE_UP" ) },
+            { 'O', talk_topic( "TALK_OPINION" ) },
+            { 'Y', talk_topic( "TALK_SHOUT" ) },
+        }
+    };
+
+    const auto iter = key_map.find( ch );
+    if( iter != key_map.end() ) {
+        return iter->second;
+    }
+
+    static const talk_topic no_topic = talk_topic( "TALK_NONE" );
+    return no_topic;
+}
+
+talk_topic dialogue::opt( dialogue_window &d_win, const talk_topic &topic )
+{
+    bool text_only = d_win.text_only;
+    std::string challenge = dynamic_line( topic );
+    gen_responses( topic );
+    // Put quotes around challenge (unless it's an action)
+    if( challenge[0] != '*' && challenge[0] != '&' ) {
+        std::stringstream tmp;
+        tmp << "\"" << challenge << "\"";
+    }
+
+    // Parse any tags in challenge
+    parse_tags( challenge, *alpha, *beta );
+    capitalize_letter( challenge );
+
+    // Prepend "My Name: "
+    if( challenge[0] == '&' ) {
+        // No name prepended!
+        challenge = challenge.substr( 1 );
+    } else if( challenge[0] == '*' ) {
+        challenge = string_format( pgettext( "npc does something", "%s %s" ), beta->name,
+                                   challenge.substr( 1 ) );
+    } else {
+        challenge = string_format( pgettext( "npc says something", "%s: %s" ), beta->name,
+                                   challenge );
+    }
+
+    d_win.add_history_separator();
+
+    // Number of lines to highlight
+    const size_t hilight_lines = d_win.add_to_history( challenge );
+    std::vector<talk_data> response_lines;
+    for( size_t i = 0; i < responses.size(); i++ ) {
+        response_lines.push_back( responses[i].create_option_line( *this, 'a' + i ) );
+    }
+
+    long ch = text_only ? 'a' + responses.size() - 1 : ' ';
+    bool okay;
+    do {
+        d_win.refresh_response_display();
+        do {
+            d_win.display_responses( hilight_lines, response_lines, ch );
+            if( !text_only ) {
+                ch = inp_mngr.get_input_event().get_first_input();
+            }
+            auto st = special_talk( ch );
+            if( st.id != "TALK_NONE" ) {
+                return st;
+            }
+            switch( ch ) {
+                // send scroll control keys back to the display window
+                case KEY_DOWN:
+                case KEY_NPAGE:
+                case KEY_UP:
+                case KEY_PPAGE:
+                    continue;
+                default:
+                    ch -= 'a';
+                    break;
+            }
+        } while( ( ch < 0 || ch >= static_cast<long>( responses.size() ) ) );
+        okay = true;
+        std::set<dialogue_consequence> consequences = responses[ch].get_consequences( *this );
+        if( consequences.count( dialogue_consequence::hostile ) > 0 ) {
+            okay = query_yn( _( "You may be attacked! Proceed?" ) );
+        } else if( consequences.count( dialogue_consequence::helpless ) > 0 ) {
+            okay = query_yn( _( "You'll be helpless! Proceed?" ) );
+        }
+    } while( !okay );
+    d_win.add_history_separator();
+
+    talk_response chosen = responses[ch];
+    std::string response_printed = string_format( pgettext( "you say something", "You: %s" ),
+                                   response_lines[ch].second.substr( 3 ) );
+    d_win.add_to_history( response_printed );
+
+    if( chosen.mission_selected != nullptr ) {
+        beta->chatbin.mission_selected = chosen.mission_selected;
+    }
+
+    // We can't set both skill and style or training will bug out
+    // TODO: Allow setting both skill and style
+    if( chosen.skill ) {
+        beta->chatbin.skill = chosen.skill;
+        beta->chatbin.style = matype_id::NULL_ID();
+    } else if( chosen.style ) {
+        beta->chatbin.style = chosen.style;
+        beta->chatbin.skill = skill_id::NULL_ID();
+    }
+
+    const bool success = chosen.trial.roll( *this );
+    const auto &effects = success ? chosen.success : chosen.failure;
+
+    return effects.apply( *this );
+}
+
+talk_trial::talk_trial( JsonObject jo )
+{
+    static const std::unordered_map<std::string, talk_trial_type> types_map = { {
+#define WRAP(value) { #value, TALK_TRIAL_##value }
+            WRAP( NONE ),
+            WRAP( LIE ),
+            WRAP( PERSUADE ),
+            WRAP( INTIMIDATE ),
+            WRAP( CONDITION )
+#undef WRAP
+        }
+    };
+    const auto iter = types_map.find( jo.get_string( "type", "NONE" ) );
+    if( iter == types_map.end() ) {
+        jo.throw_error( "invalid talk trial type", "type" );
+    }
+    type = iter->second;
+    if( !( type == TALK_TRIAL_NONE || type == TALK_TRIAL_CONDITION ) ) {
+        difficulty = jo.get_int( "difficulty" );
+    }
+
+    read_dialogue_condition( jo, condition, false );
+
+    if( jo.has_array( "mod" ) ) {
+        JsonArray ja = jo.get_array( "mod" );
+        while( ja.has_more() ) {
+            JsonArray jmod = ja.next_array();
+            trial_mod this_modifier;
+            this_modifier.first = jmod.next_string();
+            this_modifier.second = jmod.next_int();
+            modifiers.push_back( this_modifier );
+        }
+    }
+}
+
+talk_topic load_inline_topic( JsonObject jo )
+{
+    const std::string id = jo.get_string( "id" );
+    json_talk_topics[id].load( jo );
+    return talk_topic( id );
+}
+
+talk_effect_fun_t::talk_effect_fun_t( talkfunction_ptr ptr )
+{
+    function = [ptr]( const dialogue & d ) {
+        npc &p = *d.beta;
+        ptr( p );
+    };
+}
+
+talk_effect_fun_t::talk_effect_fun_t( std::function<void( npc &p )> ptr )
+{
+    function = [ptr]( const dialogue & d ) {
+        npc &p = *d.beta;
+        ptr( p );
+    };
+}
+
+// throws an error on failure, so no need to return
+std::string get_talk_varname( JsonObject jo, const std::string &member, bool check_value = true )
+{
+    if( !jo.has_string( "type" ) || !jo.has_string( "context" ) ||
+        ( check_value && !jo.has_string( "value" ) ) ) {
+        jo.throw_error( "invalid " + member + " condition in " + jo.str() );
+    }
+    const std::string &var_basename = jo.get_string( member );
+    const std::string &type_var = jo.get_string( "type" );
+    const std::string &var_context = jo.get_string( "context" );
+    return "npctalk_var_" + type_var + "_" + var_context + "_" + var_basename;
+}
+
+void talk_effect_fun_t::set_companion_mission( const std::string &role_id )
+{
+    function = [role_id]( const dialogue & d ) {
+        npc &p = *d.beta;
+        p.companion_mission_role_id = role_id;
+        talk_function::companion_mission( p );
+    };
+}
+
+void talk_effect_fun_t::set_add_effect( JsonObject jo, const std::string &member, bool is_npc )
+{
+    std::string new_effect = jo.get_string( member );
+    bool permanent = false;
+    time_duration duration = 1000_turns;
+    if( jo.has_string( "duration" ) ) {
+        const std::string dur_string = jo.get_string( "duration" );
+        if( dur_string == "PERMANENT" ) {
+            permanent = true;
+        } else if( !dur_string.empty() && std::stoi( dur_string ) > 0 ) {
+            duration = time_duration::from_turns( std::stoi( dur_string ) );
+        }
+    } else {
+        duration = time_duration::from_turns( jo.get_int( "duration" ) );
+    }
+    function = [is_npc, new_effect, duration, permanent]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        actor->add_effect( efftype_id( new_effect ), duration, num_bp, permanent );
+    };
+}
+
+void talk_effect_fun_t::set_remove_effect( JsonObject jo, const std::string &member, bool is_npc )
+{
+    std::string old_effect = jo.get_string( member );
+    function = [is_npc, old_effect]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        actor->remove_effect( efftype_id( old_effect ), num_bp );
+    };
+}
+
+void talk_effect_fun_t::set_add_trait( JsonObject jo, const std::string &member, bool is_npc )
+{
+    std::string new_trait = jo.get_string( member );
+    function = [is_npc, new_trait]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        actor->set_mutation( trait_id( new_trait ) );
+    };
+}
+
+void talk_effect_fun_t::set_remove_trait( JsonObject jo, const std::string &member, bool is_npc )
+{
+    std::string old_trait = jo.get_string( member );
+    function = [is_npc, old_trait]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        actor->unset_mutation( trait_id( old_trait ) );
+    };
+}
+
+void talk_effect_fun_t::set_add_var( JsonObject jo, const std::string &member, bool is_npc )
+{
+    const std::string var_name = get_talk_varname( jo, member );
+    const std::string &value = jo.get_string( "value" );
+    function = [is_npc, var_name, value]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        actor->set_value( var_name, value );
+    };
+}
+
+void talk_effect_fun_t::set_remove_var( JsonObject jo, const std::string &member, bool is_npc )
+{
+    const std::string var_name = get_talk_varname( jo, member, false );
+    function = [is_npc, var_name]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        actor->remove_value( var_name );
+    };
+}
+
+void talk_effect_fun_t::set_u_buy_item( const std::string &item_name, int cost, int count,
+                                        const std::string &container_name )
+{
+    function = [item_name, cost, count, container_name]( const dialogue & d ) {
+        npc &p = *d.beta;
+        player &u = *d.alpha;
+        if( container_name.empty() ) {
+            item new_item = item( item_name, calendar::turn, count );
+            u.i_add( new_item );
+            if( count == 1 ) {
+                //~ %1%s is the NPC name, %2$s is an item
+                popup( _( "%1$s gives you a %2$s" ), p.name, new_item.tname() );
+            } else {
+                //~ %1%s is the NPC name, %2$d is a number of items, %3$s are items
+                popup( _( "%1$s gives you %2$d %3$s" ), p.name, count, new_item.tname() );
+            }
+        } else {
+            item container( container_name, calendar::turn );
+            container.emplace_back( item_name, calendar::turn, count );
+            u.i_add( container );
+            //~ %1%s is the NPC name, %2$s is an item
+            popup( _( "%1$s gives you a %2$s" ), p.name, container.tname() );
+        }
+        u.cash -= cost;
+    };
+}
+
+void talk_effect_fun_t::set_u_sell_item( const std::string &item_name, int cost, int count )
+{
+    function = [item_name, cost, count]( const dialogue & d ) {
+        npc &p = *d.beta;
+        player &u = *d.alpha;
+        item old_item = item( item_name, calendar::turn, count );
+        if( u.has_charges( item_name, count ) ) {
+            u.use_charges( item_name, count );
+        } else if( u.has_amount( item_name, count ) ) {
+            u.use_amount( item_name, count );
+        } else {
+            //~ %1$s is a translated item name
+            popup( _( "You don't have a %1$s!" ), old_item.tname() );
+            return;
+        }
+        p.i_add( old_item );
+
+        if( count == 1 ) {
+            //~ %1%s is the NPC name, %2$s is an item
+            popup( _( "You give %1$s a %2$s" ), p.name, old_item.tname() );
+        } else {
+            //~ %1%s is the NPC name, %2$d is a number of items, %3$s are items
+            popup( _( "You give %1$s %2$d %3$s" ), p.name, count, old_item.tname() );
+        }
+        u.cash += cost;
+    };
+}
+
+void talk_effect_fun_t::set_consume_item( JsonObject jo, const std::string &member, int count,
+        bool is_npc )
+{
+    const std::string &item_name = jo.get_string( member );
+    function = [is_npc, item_name, count]( const dialogue & d ) {
+        // this is stupid, but I couldn't get the assignment to work
+        const auto consume_item = [&]( player & p, const std::string & item_name, int count ) {
+            item old_item( item_name );
+            if( p.has_charges( item_name, count ) ) {
+                p.use_charges( item_name, count );
+            } else if( p.has_amount( item_name, count ) ) {
+                p.use_amount( item_name, count );
+            } else {
+                //~ %1%s is the "You" or the NPC name, %2$s are a translated item name
+                popup( _( "%1$s doesn't have a %2$s!" ), p.disp_name(), old_item.tname() );
+            }
+        };
+        if( is_npc ) {
+            consume_item( *d.beta, item_name, count );
+        } else {
+            consume_item( *d.alpha, item_name, count );
+        }
+    };
+}
+
+void talk_effect_fun_t::set_u_spend_cash( int amount )
+{
+    function = [amount]( const dialogue & d ) {
+        player &u = *d.alpha;
+        u.cash -= amount;
+    };
+}
+
+void talk_effect_fun_t::set_npc_change_faction( const std::string &faction_name )
+{
+    function = [faction_name]( const dialogue & d ) {
+        npc &p = *d.beta;
+        p.my_fac = g->faction_manager_ptr->get( faction_id( faction_name ) );
+    };
+}
+
+void talk_effect_fun_t::set_npc_change_class( const std::string &class_name )
+{
+    function = [class_name]( const dialogue & d ) {
+        npc &p = *d.beta;
+        p.myclass = npc_class_id( class_name );
+    };
+}
+
+void talk_effect_fun_t::set_change_faction_rep( int rep_change )
+{
+    function = [rep_change]( const dialogue & d ) {
+        npc &p = *d.beta;
+        p.my_fac->likes_u += rep_change;
+        p.my_fac->respects_u += rep_change;
+    };
+}
+
+void talk_effect_fun_t::set_add_debt( const std::vector<trial_mod> &debt_modifiers )
+{
+    function = [debt_modifiers]( const dialogue & d ) {
+        int debt = 0;
+        for( const trial_mod &this_mod : debt_modifiers ) {
+            if( this_mod.first == "TOTAL" ) {
+                debt *= this_mod.second;
+            } else {
+                debt += parse_mod( d, this_mod.first, this_mod.second );
+            }
+        }
+        d.beta->op_of_u += npc_opinion( 0, 0, 0, 0, debt );
+    };
+}
+
+void talk_effect_fun_t::set_toggle_npc_rule( const std::string &rule )
+{
+    function = [rule]( const dialogue & d ) {
+        auto toggle = ally_rule_strs.find( rule );
+        if( toggle == ally_rule_strs.end() ) {
+            return;
+        }
+        d.beta->rules.toggle_flag( toggle->second );
+        d.beta->wield_better_weapon();
+    };
+}
+
+void talk_effect_fun_t::set_npc_engagement_rule( const std::string &setting )
+{
+    function = [setting]( const dialogue & d ) {
+        auto rule = combat_engagement_strs.find( setting );
+        if( rule != combat_engagement_strs.end() ) {
+            d.beta->rules.engagement = rule->second;
+        }
+    };
+}
+
+void talk_effect_fun_t::set_npc_aim_rule( const std::string &setting )
+{
+    function = [setting]( const dialogue & d ) {
+        auto rule = aim_rule_strs.find( setting );
+        if( rule != aim_rule_strs.end() ) {
+            d.beta->rules.aim = rule->second;
+        }
+    };
+}
+
+void talk_effect_t::set_effect_consequence( const talk_effect_fun_t &fun, dialogue_consequence con )
+{
+    effects.push_back( fun );
+    guaranteed_consequence = std::max( guaranteed_consequence, con );
+}
+
+void talk_effect_t::set_effect_consequence( std::function<void( npc &p )> ptr,
+        dialogue_consequence con )
+{
+    talk_effect_fun_t npctalk_setter( ptr );
+    set_effect_consequence( npctalk_setter, con );
+}
+
+void talk_effect_t::set_effect( const talk_effect_fun_t &fun )
+{
+    effects.push_back( fun );
+    guaranteed_consequence = std::max( guaranteed_consequence, dialogue_consequence::none );
+}
+
+void talk_effect_t::set_effect( talkfunction_ptr ptr )
+{
+    talk_effect_fun_t npctalk_setter( ptr );
+    dialogue_consequence response;
+    if( ptr == &talk_function::hostile ) {
+        response = dialogue_consequence::hostile;
+    } else if( ptr == &talk_function::player_weapon_drop ||
+               ptr == &talk_function::player_weapon_away ||
+               ptr == &talk_function::start_mugging ) {
+        response = dialogue_consequence::helpless;
+    } else {
+        response = dialogue_consequence::none;
+    }
+    set_effect_consequence( npctalk_setter, response );
+}
+
+talk_topic talk_effect_t::apply( dialogue &d ) const
+{
+    // Need to get a reference to the mission before effects are applied, because effects can remove the mission
+    mission *miss = d.beta->chatbin.mission_selected;
+
+    for( const talk_effect_fun_t &effect : effects ) {
+        effect( d );
+    }
+    d.beta->op_of_u += opinion;
+    if( miss && ( mission_opinion.trust || mission_opinion.fear ||
+                  mission_opinion.value || mission_opinion.anger ) ) {
+        int m_value = cash_to_favor( *d.beta, miss->get_value() );
+        npc_opinion mod = npc_opinion( mission_opinion.trust ?
+                                       m_value / mission_opinion.trust : 0,
+                                       mission_opinion.fear ?
+                                       m_value / mission_opinion.fear : 0,
+                                       mission_opinion.value ?
+                                       m_value / mission_opinion.value : 0,
+                                       mission_opinion.anger ?
+                                       m_value / mission_opinion.anger : 0, 0 );
+        d.beta->op_of_u += mod;
+    }
+    if( d.beta->turned_hostile() ) {
+        d.beta->make_angry();
+        return talk_topic( "TALK_DONE" );
+    }
+
+    // TODO: this is a hack, it should be in clear_mission or so, but those functions have
+    // no access to the dialogue object.
+    auto &ma = d.missions_assigned;
+    ma.clear();
+    // Update the missions we can talk about (must only be current, non-complete ones)
+    for( auto &mission : d.beta->chatbin.missions_assigned ) {
+        if( mission->get_assigned_player_id() == d.alpha->getID() ) {
+            ma.push_back( mission );
+        }
+    }
+
+    return next_topic;
+}
+
+talk_effect_t::talk_effect_t( JsonObject jo )
+{
+    load_effect( jo );
+    if( jo.has_object( "topic" ) ) {
+        next_topic = load_inline_topic( jo.get_object( "topic" ) );
+    } else {
+        next_topic = talk_topic( jo.get_string( "topic" ) );
+    }
+}
+
+void talk_effect_t::parse_sub_effect( JsonObject jo )
+{
+    talk_effect_fun_t subeffect_fun;
+    const bool is_npc = true;
+    if( jo.has_string( "companion_mission" ) ) {
+        std::string role_id = jo.get_string( "companion_mission" );
+        subeffect_fun.set_companion_mission( role_id );
+    } else if( jo.has_string( "u_add_effect" ) ) {
+        subeffect_fun.set_add_effect( jo, "u_add_effect" );
+    } else if( jo.has_string( "npc_add_effect" ) ) {
+        subeffect_fun.set_add_effect( jo, "npc_add_effect", is_npc );
+    } else if( jo.has_string( "u_lose_effect" ) ) {
+        subeffect_fun.set_remove_effect( jo, "u_lose_effect" );
+    } else if( jo.has_string( "npc_lose_effect" ) ) {
+        subeffect_fun.set_remove_effect( jo, "npc_lose_effect", is_npc );
+    } else if( jo.has_string( "u_add_var" ) ) {
+        subeffect_fun.set_add_var( jo, "u_add_var" );
+    } else if( jo.has_string( "npc_add_var" ) ) {
+        subeffect_fun.set_add_var( jo, "npc_add_var", is_npc );
+    } else if( jo.has_string( "u_lose_var" ) ) {
+        subeffect_fun.set_remove_var( jo, "u_lose_var" );
+    } else if( jo.has_string( "npc_lose_var" ) ) {
+        subeffect_fun.set_remove_var( jo, "npc_lose_var", is_npc );
+    } else if( jo.has_string( "u_add_trait" ) ) {
+        subeffect_fun.set_add_trait( jo, "u_add_trait" );
+    } else if( jo.has_string( "npc_add_trait" ) ) {
+        subeffect_fun.set_add_trait( jo, "npc_add_trait", is_npc );
+    } else if( jo.has_string( "u_lose_trait" ) ) {
+        subeffect_fun.set_remove_trait( jo, "u_lose_trait" );
+    } else if( jo.has_string( "npc_lose_trait" ) ) {
+        subeffect_fun.set_remove_trait( jo, "npc_lose_trait", is_npc );
+    } else if( jo.has_int( "u_spend_cash" ) ) {
+        int cash_change = jo.get_int( "u_spend_cash" );
+        subeffect_fun.set_u_spend_cash( cash_change );
+    } else if( jo.has_string( "u_sell_item" ) || jo.has_string( "u_buy_item" ) ||
+               jo.has_string( "u_consume_item" ) || jo.has_string( "npc_consume_item" ) ) {
+        int cost = 0;
+        if( jo.has_int( "cost" ) ) {
+            cost = jo.get_int( "cost" );
+        }
+        int count = 1;
+        if( jo.has_int( "count" ) ) {
+            count = jo.get_int( "count" );
+        }
+        std::string container_name;
+        if( jo.has_string( "container" ) ) {
+            container_name = jo.get_string( "container" );
+        }
+        if( jo.has_string( "u_sell_item" ) ) {
+            const std::string &item_name = jo.get_string( "u_sell_item" );
+            subeffect_fun.set_u_sell_item( item_name, cost, count );
+        } else if( jo.has_string( "u_buy_item" ) ) {
+            const std::string &item_name = jo.get_string( "u_buy_item" );
+            subeffect_fun.set_u_buy_item( item_name, cost, count, container_name );
+        } else if( jo.has_string( "u_consume_item" ) ) {
+            subeffect_fun.set_consume_item( jo, "u_consume_item", count );
+        } else if( jo.has_string( "npc_consume_item" ) ) {
+            subeffect_fun.set_consume_item( jo, "npc_consume_item", count, is_npc );
+        }
+    } else if( jo.has_string( "npc_change_class" ) ) {
+        std::string class_name = jo.get_string( "npc_change_class" );
+        subeffect_fun.set_npc_change_class( class_name );
+    } else if( jo.has_string( "npc_change_faction" ) ) {
+        std::string faction_name = jo.get_string( "npc_change_faction" );
+        subeffect_fun.set_npc_change_faction( faction_name );
+    } else if( jo.has_int( "u_faction_rep" ) ) {
+        int faction_rep = jo.get_int( "u_faction_rep" );
+        subeffect_fun.set_change_faction_rep( faction_rep );
+    } else if( jo.has_array( "add_debt" ) ) {
+        std::vector<trial_mod> debt_modifiers;
+        JsonArray ja = jo.get_array( "add_debt" );
+        while( ja.has_more() ) {
+            JsonArray jmod = ja.next_array();
+            trial_mod this_modifier;
+            this_modifier.first = jmod.next_string();
+            this_modifier.second = jmod.next_int();
+            debt_modifiers.push_back( this_modifier );
+        }
+        subeffect_fun.set_add_debt( debt_modifiers );
+    } else if( jo.has_string( "toggle_npc_rule" ) ) {
+        const std::string rule = jo.get_string( "toggle_npc_rule" );
+        subeffect_fun.set_toggle_npc_rule( rule );
+    } else if( jo.has_string( "set_npc_engagement_rule" ) ) {
+        const std::string setting = jo.get_string( "set_npc_engagement_rule" );
+        subeffect_fun.set_npc_engagement_rule( setting );
+    } else if( jo.has_string( "set_npc_aim_rule" ) ) {
+        const std::string setting = jo.get_string( "set_npc_aim_rule" );
+        subeffect_fun.set_npc_aim_rule( setting );
+    } else {
+        jo.throw_error( "invalid sub effect syntax :" + jo.str() );
+    }
+    set_effect( subeffect_fun );
+}
+
+void talk_effect_t::parse_string_effect( const std::string &type, JsonObject &jo )
+{
+    static const std::unordered_map<std::string, void( * )( npc & )> static_functions_map = {
+        {
+#define WRAP( function ) { #function, &talk_function::function }
+            WRAP( assign_mission ),
+            WRAP( mission_success ),
+            WRAP( mission_failure ),
+            WRAP( clear_mission ),
+            WRAP( mission_reward ),
+            WRAP( start_trade ),
+            WRAP( assign_guard ),
+            WRAP( stop_guard ),
+            WRAP( start_camp ),
+            WRAP( recover_camp ),
+            WRAP( remove_overseer ),
+            WRAP( basecamp_mission ),
+            WRAP( wake_up ),
+            WRAP( reveal_stats ),
+            WRAP( end_conversation ),
+            WRAP( insult_combat ),
+            WRAP( give_equipment ),
+            WRAP( give_aid ),
+            WRAP( give_all_aid ),
+            WRAP( buy_haircut ),
+            WRAP( buy_shave ),
+            WRAP( morale_chat ),
+            WRAP( morale_chat_activity ),
+            WRAP( buy_10_logs ),
+            WRAP( buy_100_logs ),
+            WRAP( bionic_install ),
+            WRAP( bionic_remove ),
+            WRAP( follow ),
+            WRAP( deny_follow ),
+            WRAP( deny_lead ),
+            WRAP( deny_equipment ),
+            WRAP( deny_train ),
+            WRAP( deny_personal_info ),
+            WRAP( hostile ),
+            WRAP( flee ),
+            WRAP( leave ),
+            WRAP( goto_location ),
+            WRAP( stranger_neutral ),
+            WRAP( start_mugging ),
+            WRAP( player_leaving ),
+            WRAP( drop_weapon ),
+            WRAP( player_weapon_away ),
+            WRAP( player_weapon_drop ),
+            WRAP( lead_to_safety ),
+            WRAP( start_training ),
+            WRAP( copy_npc_rules ),
+            WRAP( set_npc_pickup ),
+            WRAP( nothing )
+#undef WRAP
+        }
+    };
+    const auto iter = static_functions_map.find( type );
+    if( iter != static_functions_map.end() ) {
+        set_effect( iter->second );
+        return;
+    }
+    // more functions can be added here, they don't need to be in the map above.
+    jo.throw_error( "unknown effect string", type );
+}
+
+void talk_effect_t::load_effect( JsonObject &jo )
+{
+    if( jo.has_member( "opinion" ) ) {
+        JsonIn *ji = jo.get_raw( "opinion" );
+        // Same format as when saving a game (-:
+        opinion.deserialize( *ji );
+    }
+    if( jo.has_member( "mission_opinion" ) ) {
+        JsonIn *ji = jo.get_raw( "mission_opinion" );
+        // Same format as when saving a game (-:
+        mission_opinion.deserialize( *ji );
+    }
+    static const std::string member_name( "effect" );
+    if( !jo.has_member( member_name ) ) {
+        return;
+    } else if( jo.has_string( member_name ) ) {
+        const std::string type = jo.get_string( member_name );
+        parse_string_effect( type, jo );
+    } else if( jo.has_object( member_name ) ) {
+        JsonObject sub_effect = jo.get_object( member_name );
+        parse_sub_effect( sub_effect );
+    } else if( jo.has_array( member_name ) ) {
+        JsonArray ja = jo.get_array( member_name );
+        while( ja.has_more() ) {
+            if( ja.test_string() ) {
+                const std::string type = ja.next_string();
+                parse_string_effect( type, jo );
+            } else if( ja.test_object() ) {
+                JsonObject sub_effect = ja.next_object();
+                parse_sub_effect( sub_effect );
+            } else {
+                jo.throw_error( "invalid effect array syntax", member_name );
+            }
+        }
+    } else {
+        jo.throw_error( "invalid effect syntax", member_name );
+    }
+}
+
+talk_response::talk_response()
+{
+    truefalse_condition = []( const dialogue & ) {
+        return true;
+    };
+    mission_selected = nullptr;
+    skill = skill_id::NULL_ID();
+    style = matype_id::NULL_ID();
+}
+
+talk_response::talk_response( JsonObject jo )
+{
+    if( jo.has_member( "truefalsetext" ) ) {
+        JsonObject truefalse_jo = jo.get_object( "truefalsetext" );
+        read_dialogue_condition( truefalse_jo, truefalse_condition, true );
+        truetext = _( truefalse_jo.get_string( "true" ) );
+        falsetext = _( truefalse_jo.get_string( "false" ) );
+    } else {
+        truetext = _( jo.get_string( "text" ) );
+        truefalse_condition = []( const dialogue & ) {
+            return true;
+        };
+    }
+    if( jo.has_member( "trial" ) ) {
+        trial = talk_trial( jo.get_object( "trial" ) );
+    }
+    if( jo.has_member( "success" ) ) {
+        success = talk_effect_t( jo.get_object( "success" ) );
+    } else if( jo.has_string( "topic" ) ) {
+        // This is for simple topic switching without a possible failure
+        success.next_topic = talk_topic( jo.get_string( "topic" ) );
+        success.load_effect( jo );
+    } else if( jo.has_object( "topic" ) ) {
+        success.next_topic = load_inline_topic( jo.get_object( "topic" ) );
+    }
+    if( trial && !jo.has_member( "failure" ) ) {
+        jo.throw_error( "the failure effect is mandatory if a talk_trial has been defined" );
+    }
+    if( jo.has_member( "failure" ) ) {
+        failure = talk_effect_t( jo.get_object( "failure" ) );
+    }
+
+    // TODO: mission_selected
+    // TODO: skill
+    // TODO: style
+}
+
+json_talk_response::json_talk_response( JsonObject jo )
+    : actual_response( jo )
+{
+    load_condition( jo );
+}
+
+void read_dialogue_condition( JsonObject &jo, std::function<bool( const dialogue & )> &condition,
+                              bool default_val )
+{
+    const auto null_function = [default_val]( const dialogue & ) {
+        return default_val;
+    };
+
+    static const std::string member_name( "condition" );
+    if( !jo.has_member( member_name ) ) {
+        condition = null_function;
+    } else if( jo.has_string( member_name ) ) {
+        const std::string type = jo.get_string( member_name );
+        conditional_t sub_condition( type );
+        condition = [sub_condition]( const dialogue & d ) {
+            return sub_condition( d );
+        };
+    } else if( jo.has_object( member_name ) ) {
+        const JsonObject con_obj = jo.get_object( member_name );
+        conditional_t sub_condition( con_obj );
+        condition = [sub_condition]( const dialogue & d ) {
+            return sub_condition( d );
+        };
+    } else {
+        jo.throw_error( "invalid condition syntax", member_name );
+    }
+}
+
+void conditional_t::set_has_any_trait( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    std::vector<trait_id> traits_to_check;
+    for( auto &&f : jo.get_string_array( member ) ) { // *NOPAD*
+        traits_to_check.emplace_back( f );
+    }
+    condition = [traits_to_check, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        for( const auto &trait : traits_to_check ) {
+            if( actor->has_trait( trait ) ) {
+                return true;
+            }
+        }
+        return false;
+    };
+}
+
+void conditional_t::set_has_trait( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string &trait_to_check = jo.get_string( member );
+    condition = [trait_to_check, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->has_trait( trait_id( trait_to_check ) );
+    };
+}
+
+void conditional_t::set_has_trait_flag( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string &trait_flag_to_check = jo.get_string( member );
+    condition = [trait_flag_to_check, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        if( trait_flag_to_check == "MUTATION_THRESHOLD" ) {
+            return actor->crossed_threshold();
+        }
+        return actor->has_trait_flag( trait_flag_to_check );
+    };
+}
+
+void conditional_t::set_npc_has_class( JsonObject &jo )
+{
+    const std::string &class_to_check = jo.get_string( "npc_has_class" );
+    condition = [class_to_check]( const dialogue & d ) {
+        return d.beta->myclass == npc_class_id( class_to_check );
+    };
+}
+
+void conditional_t::set_u_has_mission( JsonObject &jo )
+{
+    const std::string &mission = jo.get_string( "u_has_mission" );
+    condition = [mission]( const dialogue & ) {
+        for( auto miss_it : g->u.get_active_missions() ) {
+            if( miss_it->mission_id() == mission_type_id( mission ) ) {
+                return true;
+            }
+        }
+        return false;
+    };
+}
+
+void conditional_t::set_has_strength( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const int min_strength = jo.get_int( member );
+    condition = [min_strength, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->str_cur >= min_strength;
+    };
+}
+
+void conditional_t::set_has_dexterity( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const int min_dexterity = jo.get_int( member );
+    condition = [min_dexterity, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->dex_cur >= min_dexterity;
+    };
+}
+
+void conditional_t::set_has_intelligence( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const int min_intelligence = jo.get_int( member );
+    condition = [min_intelligence, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->int_cur >= min_intelligence;
+    };
+}
+
+void conditional_t::set_has_perception( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const int min_perception = jo.get_int( member );
+    condition = [min_perception, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->per_cur >= min_perception;
+    };
+}
+
+void conditional_t::set_is_wearing( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string &item_id = jo.get_string( member );
+    condition = [item_id, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->is_wearing( item_id );
+    };
+}
+
+void conditional_t::set_has_item( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string &item_id = jo.get_string( member );
+    condition = [item_id, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->charges_of( item_id ) > 0 || actor->has_amount( item_id, 1 );
+    };
+}
+
+void conditional_t::set_has_items( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    JsonObject has_items = jo.get_object( member );
+    if( !has_items.has_string( "item" ) || !has_items.has_int( "count" ) ) {
+        condition = []( const dialogue & ) {
+            return false;
+        };
+    } else {
+        const std::string item_id = has_items.get_string( "item" );
+        int count = has_items.get_int( "count" );
+        condition = [item_id, count, is_npc]( const dialogue & d ) {
+            player *actor = d.alpha;
+            if( is_npc ) {
+                actor = dynamic_cast<player *>( d.beta );
+            }
+            return actor->has_charges( item_id, count ) || actor->has_amount( item_id, count );
+        };
+    }
+}
+
+void conditional_t::set_has_effect( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string &effect_id = jo.get_string( member );
+    condition = [effect_id, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->has_effect( efftype_id( effect_id ) );
+    };
+}
+
+void conditional_t::set_need( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string &need = jo.get_string( member );
+    int amount = 0;
+    if( jo.has_int( "amount" ) ) {
+        amount = jo.get_int( "amount" );
+    } else if( jo.has_string( "level" ) ) {
+        const std::string &level = jo.get_string( "level" );
+        auto flevel = fatigue_level_strs.find( level );
+        if( flevel != fatigue_level_strs.end() ) {
+            amount = static_cast<int>( flevel->second );
+        }
+    }
+    condition = [need, amount, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return ( actor->get_fatigue() > amount && need == "fatigue" ) ||
+               ( actor->get_hunger() > amount && need == "hunger" ) ||
+               ( actor->get_thirst() > amount && need == "thirst" );
+    };
+}
+
+void conditional_t::set_at_om_location( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string &location = jo.get_string( member );
+    condition = [location, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        const tripoint omt_pos = actor->global_omt_location();
+        oter_id &omt_ref = overmap_buffer.ter( omt_pos );
+
+        if( location == "FACTION_CAMP_ANY" ) {
+            cata::optional<basecamp *> bcp = overmap_buffer.find_camp( omt_pos.x, omt_pos.y );
+            if( bcp ) {
+                return true;
+            }
+            // legacy check
+            const std::string &omt_str = omt_ref.id().c_str();
+            return omt_str.find( "faction_base_camp" ) != std::string::npos;
+        } else {
+            return omt_ref == oter_id( location );
+        }
+    };
+}
+
+void conditional_t::set_has_var( JsonObject &jo, const std::string &member, bool is_npc )
+{
+    const std::string var_name = get_talk_varname( jo, member, false );
+    const std::string &value = jo.get_string( "value" );
+    condition = [var_name, value, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->get_value( var_name ) == value;
+    };
+}
+
+void conditional_t::set_npc_role_nearby( JsonObject &jo )
+{
+    const std::string &role = jo.get_string( "npc_role_nearby" );
+    condition = [role]( const dialogue & d ) {
+        const std::vector<npc *> available = g->get_npcs_if( [&]( const npc & guy ) {
+            return d.alpha->posz() == guy.posz() && guy.companion_mission_role_id == role &&
+                   ( rl_dist( d.alpha->pos(), guy.pos() ) <= 48 );
+        } );
+        return !available.empty();
+    };
+}
+
+void conditional_t::set_npc_allies( JsonObject &jo )
+{
+    const unsigned long min_allies = jo.get_int( "npc_allies" );
+    condition = [min_allies]( const dialogue & ) {
+        return g->allies().size() >= min_allies;
+    };
+}
+
+void conditional_t::set_npc_service( JsonObject &jo )
+{
+    const unsigned long service_price = jo.get_int( "npc_service" );
+    condition = [service_price]( const dialogue & d ) {
+        return !d.beta->has_effect( effect_currently_busy ) && d.alpha->cash >= service_price;
+    };
+}
+
+void conditional_t::set_u_has_cash( JsonObject &jo )
+{
+    const unsigned long min_cash = jo.get_int( "u_has_cash" );
+    condition = [min_cash]( const dialogue & d ) {
+        return d.alpha->cash >= min_cash;
+    };
+}
+
+void conditional_t::set_npc_aim_rule( JsonObject &jo )
+{
+    const std::string &setting = jo.get_string( "npc_aim_rule" );
+    condition = [setting]( const dialogue & d ) {
+        auto rule = aim_rule_strs.find( setting );
+        if( rule != aim_rule_strs.end() ) {
+            return d.beta->rules.aim == rule->second;
+        }
+        return false;
+    };
+}
+
+void conditional_t::set_npc_engagement_rule( JsonObject &jo )
+{
+    const std::string &setting = jo.get_string( "npc_engagement_rule" );
+    condition = [setting]( const dialogue & d ) {
+        auto rule = combat_engagement_strs.find( setting );
+        if( rule != combat_engagement_strs.end() ) {
+            return d.beta->rules.engagement == rule->second;
+        }
+        return false;
+    };
+}
+
+void conditional_t::set_npc_rule( JsonObject &jo )
+{
+    std::string rule = jo.get_string( "npc_rule" );
+    condition = [rule]( const dialogue & d ) {
+        auto flag = ally_rule_strs.find( rule );
+        if( flag != ally_rule_strs.end() ) {
+            return d.beta->rules.has_flag( flag->second );
+        }
+        return false;
+    };
+}
+
+void conditional_t::set_days_since( JsonObject &jo )
+{
+    const unsigned long days = jo.get_int( "days_since_cataclysm" );
+    condition = [days]( const dialogue & ) {
+        return to_turn<int>( calendar::turn ) >= DAYS( days );
+    };
+}
+
+void conditional_t::set_is_season( JsonObject &jo )
+{
+    std::string season_name = jo.get_string( "is_season" );
+    condition = [season_name]( const dialogue & ) {
+        const auto season = season_of_year( calendar::turn );
+        return ( season == SPRING && season_name == "spring" ) ||
+               ( season == SUMMER && season_name == "summer" ) ||
+               ( season == AUTUMN && season_name == "autumn" ) ||
+               ( season == WINTER && season_name == "winter" );
+    };
+}
+
+void conditional_t::set_mission_goal( JsonObject &jo )
+{
+    std::string mission_goal_str = jo.get_string( "mission_goal" );
+    condition = [mission_goal_str]( const dialogue & d ) {
+        mission *miss = d.beta->chatbin.mission_selected;
+        const auto mgoal = mission_goal_strs.find( mission_goal_str );
+        if( !miss || mgoal == mission_goal_strs.end() ) {
+            return false;
+        }
+        return miss->get_type().goal == mgoal->second;
+    };
+}
+
+void conditional_t::set_is_gender( bool is_male, bool is_npc )
+{
+    condition = [is_male, is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return actor->male == is_male;
+    };
+}
+
+void conditional_t::set_no_assigned_mission()
+{
+    condition = []( const dialogue & d ) {
+        return d.missions_assigned.empty();
+    };
+}
+
+void conditional_t::set_has_assigned_mission()
+{
+    condition = []( const dialogue & d ) {
+        return d.missions_assigned.size() == 1;
+    };
+}
+
+void conditional_t::set_has_many_assigned_missions()
+{
+    condition = []( const dialogue & d ) {
+        return d.missions_assigned.size() >= 2;
+    };
+}
+
+void conditional_t::set_no_available_mission()
+{
+    condition = []( const dialogue & d ) {
+        return d.beta->chatbin.missions.empty();
+    };
+}
+
+void conditional_t::set_has_available_mission()
+{
+    condition = []( const dialogue & d ) {
+        return d.beta->chatbin.missions.size() == 1;
+    };
+}
+
+void conditional_t::set_has_many_available_missions()
+{
+    condition = []( const dialogue & d ) {
+        return d.beta->chatbin.missions.size() >= 2;
+    };
+}
+
+void conditional_t::set_mission_complete()
+{
+    condition = []( const dialogue & d ) {
+        mission *miss = d.beta->chatbin.mission_selected;
+        if( !miss ) {
+            return false;
+        }
+        return miss->is_complete( d.beta->getID() );
+    };
+}
+
+void conditional_t::set_mission_incomplete()
+{
+    condition = []( const dialogue & d ) {
+        mission *miss = d.beta->chatbin.mission_selected;
+        if( !miss ) {
+            return false;
+        }
+        return !miss->is_complete( d.beta->getID() );
+    };
+}
+
+void conditional_t::set_npc_available()
+{
+    condition = []( const dialogue & d ) {
+        return !d.beta->has_effect( effect_currently_busy );
+    };
+}
+
+void conditional_t::set_npc_following()
+{
+    condition = []( const dialogue & d ) {
+        return d.beta->is_following();
+    };
+}
+
+void conditional_t::set_npc_friend()
+{
+    condition = []( const dialogue & d ) {
+        return d.beta->is_friend();
+    };
+}
+
+void conditional_t::set_npc_hostile()
+{
+    condition = []( const dialogue & d ) {
+        return d.beta->is_enemy();
+    };
+}
+
+void conditional_t::set_npc_train_skills()
+{
+    condition = []( const dialogue & d ) {
+        return !d.beta->skills_offered_to( *d.alpha ).empty();
+    };
+}
+
+void conditional_t::set_npc_train_styles()
+{
+    condition = []( const dialogue & d ) {
+        return !d.beta->styles_offered_to( *d.alpha ).empty();
+    };
+}
+
+void conditional_t::set_at_safe_space()
+{
+    condition = []( const dialogue & d ) {
+        return overmap_buffer.is_safe( d.beta->global_omt_location() );
+    };
+}
+
+void conditional_t::set_can_stow_weapon( bool is_npc )
+{
+    condition = [is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return !actor->unarmed_attack() && actor->can_pickVolume( actor->weapon );
+    };
+}
+
+void conditional_t::set_has_weapon( bool is_npc )
+{
+    condition = [is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        return !actor->unarmed_attack();
+    };
+}
+
+void conditional_t::set_is_driving( bool is_npc )
+{
+    condition = [is_npc]( const dialogue & d ) {
+        player *actor = d.alpha;
+        if( is_npc ) {
+            actor = dynamic_cast<player *>( d.beta );
+        }
+        if( const optional_vpart_position vp = g->m.veh_at( actor->pos() ) ) {
+            return vp->vehicle().is_moving() && vp->vehicle().player_in_control( *actor );
+        }
+        return false;
+    };
+}
+
+void conditional_t::set_is_day()
+{
+    condition = []( const dialogue & ) {
+        return !calendar::turn.is_night();
+    };
+}
+
+void conditional_t::set_is_outside()
+{
+    condition = []( const dialogue & d ) {
+        const tripoint pos = g->m.getabs( d.beta->pos() );
+        return !g->m.has_flag( TFLAG_INDOORS, pos );
+    };
+}
+
+void conditional_t::set_u_has_camp()
+{
+    condition = []( const dialogue & ) {
+        return !g->u.camps.empty();
+    };
+}
+
+void conditional_t::set_has_pickup_list()
+{
+    condition = []( const dialogue & d ) {
+        return !d.beta->rules.pickup_whitelist->empty();
+    };
+}
+
+conditional_t::conditional_t( JsonObject jo )
+{
+    // improve the clarity of NPC setter functions
+    const bool is_npc = true;
+    const auto parse_array = []( JsonObject jo, const std::string & type ) {
+        std::vector<conditional_t> conditionals;
+        JsonArray ja = jo.get_array( type );
+        while( ja.has_more() ) {
+            if( ja.test_string() ) {
+                conditional_t type_condition( ja.next_string() );
+                conditionals.emplace_back( type_condition );
+            } else if( ja.test_object() ) {
+                conditional_t type_condition( ja.next_object() );
+                conditionals.emplace_back( type_condition );
+            } else {
+                ja.skip_value();
+            }
+        }
+        return conditionals;
+    };
+    if( jo.has_array( "and" ) ) {
+        std::vector<conditional_t> and_conditionals = parse_array( jo, "and" );
+        condition = [and_conditionals]( const dialogue & d ) {
+            for( const auto &cond : and_conditionals ) {
+                if( !cond( d ) ) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    } else if( jo.has_array( "or" ) ) {
+        std::vector<conditional_t> or_conditionals = parse_array( jo, "or" );
+        condition = [or_conditionals]( const dialogue & d ) {
+            for( const auto &cond : or_conditionals ) {
+                if( cond( d ) ) {
+                    return true;
+                }
+            }
+            return false;
+        };
+    } else if( jo.has_object( "not" ) ) {
+        const conditional_t sub_condition = conditional_t( jo.get_object( "not" ) );
+        condition = [sub_condition]( const dialogue & d ) {
+            return !sub_condition( d );
+        };
+    } else if( jo.has_string( "not" ) ) {
+        const conditional_t sub_condition = conditional_t( jo.get_string( "not" ) );
+        condition = [sub_condition]( const dialogue & d ) {
+            return !sub_condition( d );
+        };
+    } else if( jo.has_member( "u_has_any_trait" ) ) {
+        set_has_any_trait( jo, "u_has_any_trait" );
+    } else if( jo.has_member( "npc_has_any_trait" ) ) {
+        set_has_any_trait( jo, "npc_has_any_trait", true );
+    } else if( jo.has_member( "u_has_trait" ) ) {
+        set_has_trait( jo, "u_has_trait" );
+    } else if( jo.has_member( "npc_has_trait" ) ) {
+        set_has_trait( jo, "npc_has_trait", true );
+    } else if( jo.has_member( "u_has_trait_flag" ) ) {
+        set_has_trait_flag( jo, "u_has_trait_flag" );
+    } else if( jo.has_member( "npc_has_trait_flag" ) ) {
+        set_has_trait_flag( jo, "npc_has_trait_flag", true );
+    } else if( jo.has_member( "npc_has_class" ) ) {
+        set_npc_has_class( jo );
+    } else if( jo.has_string( "u_has_mission" ) ) {
+        set_u_has_mission( jo );
+    } else if( jo.has_int( "u_has_strength" ) ) {
+        set_has_strength( jo, "u_has_strength" );
+    } else if( jo.has_int( "npc_has_strength" ) ) {
+        set_has_strength( jo, "npc_has_strength", is_npc );
+    } else if( jo.has_int( "u_has_dexterity" ) ) {
+        set_has_dexterity( jo, "u_has_dexterity" );
+    } else if( jo.has_int( "npc_has_dexterity" ) ) {
+        set_has_dexterity( jo, "npc_has_dexterity", is_npc );
+    } else if( jo.has_int( "u_has_intelligence" ) ) {
+        set_has_intelligence( jo, "u_has_intelligence" );
+    } else if( jo.has_int( "npc_has_intelligence" ) ) {
+        set_has_intelligence( jo, "npc_has_intelligence", is_npc );
+    } else if( jo.has_int( "u_has_perception" ) ) {
+        set_has_perception( jo, "u_has_perception" );
+    } else if( jo.has_int( "npc_has_perception" ) ) {
+        set_has_perception( jo, "npc_has_perception", is_npc );
+    } else if( jo.has_string( "u_is_wearing" ) ) {
+        set_is_wearing( jo, "u_is_wearing" );
+    } else if( jo.has_string( "npc_is_wearing" ) ) {
+        set_is_wearing( jo, "npc_is_wearing", is_npc );
+    } else if( jo.has_string( "u_has_item" ) ) {
+        set_has_item( jo, "u_has_item" );
+    } else if( jo.has_string( "npc_has_item" ) ) {
+        set_has_item( jo, "npc_has_item", is_npc );
+    } else if( jo.has_member( "u_has_items" ) ) {
+        set_has_items( jo, "u_has_items" );
+    } else if( jo.has_member( "npc_has_items" ) ) {
+        set_has_items( jo, "npc_has_items", is_npc );
+    } else if( jo.has_string( "u_has_effect" ) ) {
+        set_has_effect( jo, "u_has_effect" );
+    } else if( jo.has_string( "npc_has_effect" ) ) {
+        set_has_effect( jo, "npc_has_effect", is_npc );
+    } else if( jo.has_string( "u_need" ) ) {
+        set_need( jo, "u_need" );
+    } else if( jo.has_string( "npc_need" ) ) {
+        set_need( jo, "npc_need", is_npc );
+    } else if( jo.has_string( "u_at_om_location" ) ) {
+        set_at_om_location( jo, "u_at_om_location" );
+    } else if( jo.has_string( "npc_at_om_location" ) ) {
+        set_at_om_location( jo, "npc_at_om_location", is_npc );
+    } else if( jo.has_string( "u_has_var" ) ) {
+        set_has_var( jo, "u_has_var" );
+    } else if( jo.has_string( "npc_has_var" ) ) {
+        set_has_var( jo, "npc_has_var", is_npc );
+    } else if( jo.has_string( "npc_role_nearby" ) ) {
+        set_npc_role_nearby( jo );
+    } else if( jo.has_int( "npc_allies" ) ) {
+        set_npc_allies( jo );
+    } else if( jo.has_int( "npc_service" ) ) {
+        set_npc_service( jo );
+    } else if( jo.has_int( "u_has_cash" ) ) {
+        set_u_has_cash( jo );
+    } else if( jo.has_string( "npc_aim_rule" ) ) {
+        set_npc_aim_rule( jo );
+    } else if( jo.has_string( "npc_engagement_rule" ) ) {
+        set_npc_engagement_rule( jo );
+    } else if( jo.has_string( "npc_rule" ) ) {
+        set_npc_rule( jo );
+    } else if( jo.has_int( "days_since_cataclysm" ) ) {
+        set_days_since( jo );
+    } else if( jo.has_string( "is_season" ) ) {
+        set_is_season( jo );
+    } else if( jo.has_string( "mission_goal" ) ) {
+        set_mission_goal( jo );
+    } else {
+        bool found_sub_member = false;
+        for( const std::string &sub_member : dialogue_data::simple_string_conds ) {
+            if( jo.has_string( sub_member ) ) {
+                const conditional_t sub_condition( jo.get_string( sub_member ) );
+                condition = [sub_condition]( const dialogue & d ) {
+                    return sub_condition( d );
+                };
+                found_sub_member = true;
+                break;
+            }
+        }
+        if( !found_sub_member ) {
+            condition = []( const dialogue & ) {
+                return false;
+            };
+        }
+    }
+}
+
+conditional_t::conditional_t( const std::string &type )
+{
+    const bool is_npc = true;
+    if( type == "u_male" ) {
+        set_is_gender( true );
+    } else if( type == "npc_male" ) {
+        set_is_gender( true, is_npc );
+    } else if( type == "u_female" ) {
+        set_is_gender( false );
+    } else if( type == "npc_female" ) {
+        set_is_gender( false, is_npc );
+    } else if( type == "has_no_assigned_mission" ) {
+        set_no_assigned_mission();
+    } else if( type == "has_assigned_mission" ) {
+        set_has_assigned_mission();
+    } else if( type == "has_many_assigned_missions" ) {
+        set_has_many_assigned_missions();
+    } else if( type == "has_no_available_mission" ) {
+        set_no_available_mission();
+    } else if( type == "has_available_mission" ) {
+        set_has_available_mission();
+    } else if( type == "has_many_available_missions" ) {
+        set_has_many_available_missions();
+    } else if( type == "mission_complete" ) {
+        set_mission_complete();
+    } else if( type == "mission_incomplete" ) {
+        set_mission_incomplete();
+    } else if( type == "npc_available" ) {
+        set_npc_available();
+    } else if( type == "npc_following" ) {
+        set_npc_following();
+    } else if( type == "npc_friend" ) {
+        set_npc_friend();
+    } else if( type == "npc_hostile" ) {
+        set_npc_hostile();
+    } else if( type == "npc_train_skills" ) {
+        set_npc_train_skills();
+    } else if( type == "npc_train_styles" ) {
+        set_npc_train_styles();
+    } else if( type == "at_safe_space" ) {
+        set_at_safe_space();
+    } else if( type == "u_can_stow_weapon" ) {
+        set_can_stow_weapon();
+    } else if( type == "npc_can_stow_weapon" ) {
+        set_can_stow_weapon( is_npc );
+    } else if( type == "u_has_weapon" ) {
+        set_has_weapon();
+    } else if( type == "npc_has_weapon" ) {
+        set_has_weapon( is_npc );
+    } else if( type == "u_driving" ) {
+        set_is_driving();
+    } else if( type == "npc_driving" ) {
+        set_is_driving( is_npc );
+    } else if( type == "is_day" ) {
+        set_is_day();
+    } else if( type == "is_outside" ) {
+        set_is_outside();
+    } else if( type == "u_has_camp" ) {
+        set_u_has_camp();
+    } else if( type == "has_pickup_list" ) {
+        set_has_pickup_list();
+    } else {
+        condition = []( const dialogue & ) {
+            return false;
+        };
+    }
+}
+
+void json_talk_response::load_condition( JsonObject &jo )
+{
+    is_switch = jo.get_bool( "switch", false );
+    is_default = jo.get_bool( "default", false );
+    read_dialogue_condition( jo, condition, true );
+}
+
+bool json_talk_response::test_condition( const dialogue &d ) const
+{
+    if( condition ) {
+        return condition( d );
+    }
+    return true;
+}
+
+bool json_talk_response::gen_responses( dialogue &d, bool switch_done ) const
+{
+    if( test_condition( d ) ) {
+        if( !is_switch || ( is_switch && !switch_done ) ) {
+            d.responses.emplace_back( actual_response );
+        }
+        return is_switch && !is_default;
+    }
     return false;
+}
+
+dynamic_line_t dynamic_line_t::from_member( JsonObject &jo, const std::string &member_name )
+{
+    if( jo.has_array( member_name ) ) {
+        return dynamic_line_t( jo.get_array( member_name ) );
+    } else if( jo.has_object( member_name ) ) {
+        return dynamic_line_t( jo.get_object( member_name ) );
+    } else if( jo.has_string( member_name ) ) {
+        return dynamic_line_t( jo.get_string( member_name ) );
+    } else {
+        return dynamic_line_t{};
+    }
+}
+
+dynamic_line_t::dynamic_line_t( const std::string &line )
+{
+    function = [line]( const dialogue & ) {
+        return _( line );
+    };
+}
+
+dynamic_line_t::dynamic_line_t( JsonObject jo )
+{
+    if( jo.has_member( "and" ) ) {
+        std::vector<dynamic_line_t> lines;
+        JsonArray ja = jo.get_array( "and" );
+        while( ja.has_more() ) {
+            if( ja.test_string() ) {
+                lines.emplace_back( ja.next_string() );
+            } else if( ja.test_array() ) {
+                lines.emplace_back( ja.next_array() );
+            } else if( ja.test_object() ) {
+                lines.emplace_back( ja.next_object() );
+            } else {
+                ja.throw_error( "invalid format: must be string, array or object" );
+            }
+        }
+        function = [lines]( const dialogue & d ) {
+            std::string all_lines;
+            for( const dynamic_line_t &line : lines ) {
+                all_lines += line( d );
+            }
+            return all_lines;
+        };
+    } else if( jo.has_member( "give_hint" ) ) {
+        function = [&]( const dialogue & ) {
+            return get_hint();
+        };
+    } else {
+        conditional_t dcondition;
+        const dynamic_line_t yes = from_member( jo, "yes" );
+        const dynamic_line_t no = from_member( jo, "no" );
+        for( const std::string &sub_member : dialogue_data::simple_string_conds ) {
+            if( jo.has_bool( sub_member ) ) {
+                dcondition = conditional_t( sub_member );
+                function = [dcondition, yes, no]( const dialogue & d ) {
+                    return ( dcondition( d ) ? yes : no )( d );
+                };
+                return;
+            } else if( jo.has_member( sub_member ) ) {
+                dcondition = conditional_t( sub_member );
+                const dynamic_line_t yes_member = from_member( jo, sub_member );
+                function = [dcondition, yes_member, no]( const dialogue & d ) {
+                    return ( dcondition( d ) ? yes_member : no )( d );
+                };
+                return;
+            }
+        }
+        for( const std::string &sub_member : dialogue_data::complex_conds ) {
+            if( jo.has_member( sub_member ) ) {
+                dcondition = conditional_t( jo );
+                function = [dcondition, yes, no]( const dialogue & d ) {
+                    return ( dcondition( d ) ? yes : no )( d );
+                };
+                return;
+            }
+        }
+        jo.throw_error( "dynamic line not supported" );
+    }
+}
+
+dynamic_line_t::dynamic_line_t( JsonArray ja )
+{
+    std::vector<dynamic_line_t> lines;
+    while( ja.has_more() ) {
+        if( ja.test_string() ) {
+            lines.emplace_back( ja.next_string() );
+        } else if( ja.test_array() ) {
+            lines.emplace_back( ja.next_array() );
+        } else if( ja.test_object() ) {
+            lines.emplace_back( ja.next_object() );
+        } else {
+            ja.throw_error( "invalid format: must be string, array or object" );
+        }
+    }
+    function = [lines]( const dialogue & d ) {
+        const dynamic_line_t &line = random_entry_ref( lines );
+        return line( d );
+    };
+}
+
+void json_talk_topic::load( JsonObject &jo )
+{
+    if( jo.has_member( "dynamic_line" ) ) {
+        dynamic_line = dynamic_line_t::from_member( jo, "dynamic_line" );
+    }
+    JsonArray ja = jo.get_array( "responses" );
+    responses.reserve( responses.size() + ja.size() );
+    while( ja.has_more() ) {
+        responses.emplace_back( ja.next_object() );
+    }
+    if( responses.empty() ) {
+        jo.throw_error( "no responses for talk topic defined", "responses" );
+    }
+    replace_built_in_responses = jo.get_bool( "replace_built_in_responses",
+                                 replace_built_in_responses );
+}
+
+bool json_talk_topic::gen_responses( dialogue &d ) const
+{
+    d.responses.reserve( responses.size() ); // A wild guess, can actually be more or less
+    bool switch_done = false;
+    for( auto &r : responses ) {
+        switch_done |= r.gen_responses( d, switch_done );
+    }
+    return replace_built_in_responses;
+}
+
+std::string json_talk_topic::get_dynamic_line( const dialogue &d ) const
+{
+    return dynamic_line( d );
+}
+
+void json_talk_topic::check_consistency() const
+{
+    // TODO: check that all referenced topic actually exist. This is currently not possible
+    // as they only exist as built in strings, not in the json_talk_topics map.
+}
+
+void unload_talk_topics()
+{
+    json_talk_topics.clear();
+}
+
+void load_talk_topic( JsonObject &jo )
+{
+    if( jo.has_array( "id" ) ) {
+        for( auto &id : jo.get_string_array( "id" ) ) {
+            json_talk_topics[id].load( jo );
+        }
+    } else {
+        const std::string id = jo.get_string( "id" );
+        json_talk_topics[id].load( jo );
+    }
+}
+
+std::string npc::pick_talk_topic( const player &u )
+{
+    ( void )u;
+    if( personality.aggression > 0 ) {
+        if( op_of_u.fear * 2 < personality.bravery && personality.altruism < 0 ) {
+            set_attitude( NPCATT_MUG );
+            return "TALK_MUG";
+        }
+
+        if( personality.aggression + personality.bravery - op_of_u.fear > 0 ) {
+            return "TALK_STRANGER_AGGRESSIVE";
+        }
+    }
+
+    if( op_of_u.fear * 2 > personality.altruism + personality.bravery ) {
+        return "TALK_STRANGER_SCARED";
+    }
+
+    if( op_of_u.fear * 2 > personality.bravery + op_of_u.trust ) {
+        return "TALK_STRANGER_WARY";
+    }
+
+    if( op_of_u.trust - op_of_u.fear +
+        ( personality.bravery + personality.altruism ) / 2 > 0 ) {
+        return "TALK_STRANGER_FRIENDLY";
+    }
+
+    set_attitude( NPCATT_NULL );
+    return "TALK_STRANGER_NEUTRAL";
+}
+
+enum consumption_result {
+    REFUSED = 0,
+    CONSUMED_SOME, // Consumption didn't fail, but don't delete the item
+    CONSUMED_ALL   // Consumption succeeded, delete the item
+};
+
+// Returns true if we destroyed the item through consumption
+consumption_result try_consume( npc &p, item &it, std::string &reason )
+{
+    // TODO: Unify this with 'player::consume_item()'
+    bool consuming_contents = it.is_container() && !it.contents.empty();
+    item &to_eat = consuming_contents ? it.contents.front() : it;
+    const auto &comest = to_eat.type->comestible;
+    if( !comest ) {
+        // Don't inform the player that we don't want to eat the lighter
+        return REFUSED;
+    }
+
+    if( !p.will_accept_from_player( it ) ) {
+        reason = _( "I don't <swear> trust you enough to eat THIS..." );
+        return REFUSED;
+    }
+
+    // TODO: Make it not a copy+paste from player::consume_item
+    int amount_used = 1;
+    if( to_eat.is_food() ) {
+        if( !p.eat( to_eat ) ) {
+            reason = _( "It doesn't look like a good idea to consume this..." );
+            return REFUSED;
+        }
+    } else if( to_eat.is_medication() || to_eat.get_contained().is_medication() ) {
+        if( comest->tool != "null" ) {
+            bool has = p.has_amount( comest->tool, 1 );
+            if( item::count_by_charges( comest->tool ) ) {
+                has = p.has_charges( comest->tool, 1 );
+            }
+            if( !has ) {
+                reason = string_format( _( "I need a %s to consume that!" ),
+                                        item::nname( comest->tool ).c_str() );
+                return REFUSED;
+            }
+            p.use_charges( comest->tool, 1 );
+        }
+        if( to_eat.type->has_use() ) {
+            amount_used = to_eat.type->invoke( p, to_eat, p.pos() );
+            if( amount_used <= 0 ) {
+                reason = _( "It doesn't look like a good idea to consume this.." );
+                return REFUSED;
+            }
+        }
+
+        to_eat.charges -= amount_used;
+        p.consume_effects( to_eat );
+        p.moves -= 250;
+    } else {
+        debugmsg( "Unknown comestible type of item: %s\n", to_eat.tname().c_str() );
+    }
+
+    if( to_eat.charges > 0 ) {
+        return CONSUMED_SOME;
+    }
+
+    if( consuming_contents ) {
+        it.contents.erase( it.contents.begin() );
+        return CONSUMED_SOME;
+    }
+
+    // If not consuming contents and charge <= 0, we just ate the last charge from the stack
+    return CONSUMED_ALL;
+}
+
+std::string give_item_to( npc &p, bool allow_use, bool allow_carry )
+{
+    const int inv_pos = g->inv_for_all( _( "Offer what?" ), _( "You have no items to offer." ) );
+    item &given = g->u.i_at( inv_pos );
+    if( given.is_null() ) {
+        return _( "Changed your mind?" );
+    }
+
+    if( &given == &g->u.weapon && given.has_flag( "NO_UNWIELD" ) ) {
+        // Bionic weapon or shackles
+        return _( "How?" );
+    }
+
+    if( given.is_dangerous() && !g->u.has_trait( trait_DEBUG_MIND_CONTROL ) ) {
+        return _( "Are you <swear> insane!?" );
+    }
+
+    std::string no_consume_reason;
+    if( allow_use ) {
+        // Eating first, to avoid evaluating bread as a weapon
+        const auto consume_res = try_consume( p, given, no_consume_reason );
+        if( consume_res == CONSUMED_ALL ) {
+            g->u.i_rem( inv_pos );
+        }
+        if( consume_res != REFUSED ) {
+            g->u.moves -= 100;
+            if( given.is_container() ) {
+                given.on_contents_changed();
+            }
+            return _( "Here we go..." );
+        }
+    }
+
+    bool taken = false;
+    long our_ammo = p.ammo_count_for( p.weapon );
+    long new_ammo = p.ammo_count_for( given );
+    const double new_weapon_value = p.weapon_value( given, new_ammo );
+    const double cur_weapon_value = p.weapon_value( p.weapon, our_ammo );
+    if( allow_use ) {
+        add_msg( m_debug, "NPC evaluates own %s (%d ammo): %0.1f",
+                 p.weapon.tname(), our_ammo, cur_weapon_value );
+        add_msg( m_debug, "NPC evaluates your %s (%d ammo): %0.1f",
+                 given.tname(), new_ammo, new_weapon_value );
+        if( new_weapon_value > cur_weapon_value ) {
+            p.wield( given );
+            taken = true;
+        }
+
+        // is_gun here is a hack to prevent NPCs wearing guns if they don't want to use them
+        if( !taken && !given.is_gun() && p.wear_if_wanted( given ) ) {
+            taken = true;
+        }
+    }
+
+    if( !taken && allow_carry &&
+        p.can_pickVolume( given ) &&
+        p.can_pickWeight( given ) ) {
+        taken = true;
+        p.i_add( given );
+    }
+
+    if( taken ) {
+        g->u.i_rem( inv_pos );
+        g->u.moves -= 100;
+        p.has_new_items = true;
+        return _( "Thanks!" );
+    }
+
+    std::stringstream reason;
+    reason << _( "Nope." );
+    reason << std::endl;
+    if( allow_use ) {
+        if( !no_consume_reason.empty() ) {
+            reason << no_consume_reason;
+            reason << std::endl;
+        }
+
+        reason << _( "My current weapon is better than this." );
+        reason << std::endl;
+        reason << string_format( _( "(new weapon value: %.1f vs %.1f)." ),
+                                 new_weapon_value, cur_weapon_value );
+        if( !given.is_gun() && given.is_armor() ) {
+            reason << std::endl;
+            reason << string_format( _( "It's too encumbering to wear." ) );
+        }
+    }
+    if( allow_carry ) {
+        if( !p.can_pickVolume( given ) ) {
+            const units::volume free_space = p.volume_capacity() - p.volume_carried();
+            reason << std::endl;
+            reason << string_format( _( "I have no space to store it." ) );
+            reason << std::endl;
+            if( free_space > 0_ml ) {
+                reason << string_format( _( "I can only store %s %s more." ),
+                                         format_volume( free_space ), volume_units_long() );
+            } else {
+                reason << string_format( _( "...or to store anything else for that matter." ) );
+            }
+        }
+        if( !p.can_pickWeight( given ) ) {
+            reason << std::endl;
+            reason << string_format( _( "It is too heavy for me to carry." ) );
+        }
+    }
+
+    return reason.str();
+}
+
+bool npc::has_item_whitelist() const
+{
+    return is_following() && !rules.pickup_whitelist->empty();
+}
+
+bool npc::item_name_whitelisted( const std::string &to_match )
+{
+    if( !has_item_whitelist() ) {
+        return true;
+    }
+
+    auto &wlist = *rules.pickup_whitelist;
+    const auto rule = wlist.check_item( to_match );
+    if( rule == RULE_WHITELISTED ) {
+        return true;
+    }
+
+    if( rule == RULE_BLACKLISTED ) {
+        return false;
+    }
+
+    wlist.create_rule( to_match );
+    return wlist.check_item( to_match ) == RULE_WHITELISTED;
+}
+
+bool npc::item_whitelisted( const item &it )
+{
+    if( !has_item_whitelist() ) {
+        return true;
+    }
+
+    const auto to_match = it.tname( 1, false );
+    return item_name_whitelisted( to_match );
 }

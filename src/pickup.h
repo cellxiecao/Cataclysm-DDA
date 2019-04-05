@@ -1,40 +1,45 @@
+#pragma once
 #ifndef PICKUP_H
 #define PICKUP_H
 
-#include "enums.h"
-
-#include <map>
 #include <list>
-#include <vector>
-#include <string>
+
+#include "enums.h"
 
 class vehicle;
 class item;
-
-class Pickup
+class Character;
+class player;
+class map;
+namespace catacurses
 {
-    public:
-        static void do_pickup( point pickup_target, bool from_vehicle,
-                               std::list<int> &indices, std::list<int> &quantities, bool autopickup );
-        static void pick_up(int posx, int posy, int min); // Pick up items; ',' or via examine()
+class window;
+} // namespace catacurses
+namespace Pickup
+{
+/**
+ * Returns `false` if the player was presented a prompt and decided to cancel the pickup.
+ * `true` in other cases.
+ */
+bool do_pickup( const tripoint &pickup_target_arg, bool from_vehicle,
+                std::list<int> &indices, std::list<int> &quantities, bool autopickup );
 
-    private:
-        // No instances of Pickup allowed.
-        Pickup() {}
+/** Pick up items; ',' or via examine() */
+void pick_up( const tripoint &p, int min );
+/** Determines the cost of moving an item by a character. */
+int cost_to_move_item( const Character &who, const item &it );
 
-        // Pickup helper functions
-        static void pick_one_up( const point &pickup_target, std::vector<item> &here,
-                                 vehicle *veh, int cargo_part, int index, int quantity,
-                                 bool &got_water, bool &offered_swap,
-                                 std::map<std::string, int> &mapPickup, bool autopickup );
-
-        static int interact_with_vehicle( vehicle *veh, int posx, int posy, int veh_root_part );
-
-        static int handle_quiver_insertion( item &here, bool inv_on_fail, int &moves_to_decrement,
-                                            bool &picked_up );
-        static void remove_from_map_or_vehicle( int posx, int posy, vehicle *veh, int cargo_part,
-                                                int &moves_taken, int curmit );
-        static void show_pickup_message( std::map<std::string, int> &mapPickup );
-};
+/**
+ * If character is handling a potentially spillable bucket, gracefully handle what
+ * to do with the contents.
+ *
+ * Returns true if we handled the container, false if we chose to spill the
+ * contents and the container still needs to be put somewhere.
+ * @param c Character handling the spillable item
+ * @param it item to handle
+ * @param m map they are on
+ */
+bool handle_spillable_contents( Character &c, item &it, map &m );
+}
 
 #endif

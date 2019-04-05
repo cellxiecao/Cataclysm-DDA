@@ -1,19 +1,18 @@
-# Este mensaje debe tener 16 líneas de largo como máximo.
-# Este mensaje debe tener 16 líneas de largo como máximo.
-####################################################################
-Autor original: Director del Proyecto: Sitio Web/Foro:
-Whales (retirado) KevinGranade GlyphGryph
+# El largo máximo de una línea es de 78 caracteres; la siguiente línea es para usar de referencia
+# Longer lines will be automatically folded
+##############################################################################
+Autor original:      Director del Proyecto:    Sitio Web/Foro:
+Whales (retirado)    KevinGranade              GlyphGryph
 
-Desarrolladores principales actuales/Encargados de Github:
-KevinGranade, i2amroy, Rivet-the-Zombie, KA101, BevapDin
+Desarrolladores actuales principales/Encargados de Github:
+KevinGranade, Rivet-the-Zombie, KA101, BevapDin, Coolthulu, i2amroy
 
 Agradecimientos especiales:
-TheDarklingWolf - Por crear Cataclysm:DDA así como lo conocemos.
 Narc - Por configurar el bot de construcción Jenkins automático.
-BevapDin - Por su incansable esfuerzo reparando bugs.
-dwarfkoala - Por una plétora de jerarquización de bugs.
-illi-kun - Por sus incontables limpiezas en la UI.
+Acidia - Por sus maravillosos PNJ, Misiones y Locaciones.
+Wuzzy y VlasovVitaly - Por sus esfuerzos hercúleos de traducción.
+HuXTUS - Por una cantidad enorme de contenido espectacular.
 
-Para ver la lista completa de colaboradores, por favor, visita:
+Para ver la lista completa de colaboradores, por favor, visitá:
 https://github.com/CleverRaven/Cataclysm-DDA/contributors
 Cataclysm: Dark Days Ahead ha sido liberado bajo licencia CC-BY-SA 3.0.
